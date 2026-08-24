@@ -18,3 +18,30 @@
 - **打包**：DMG 命名规范 `DeepSeekHarness-<版本>-<MMddHHmm>-<full|lite>.dmg`；
   README 新增构建教程与体积对比表、Git 面板截图。
 - **许可证**：采用 MIT。
+
+## 2026-08-24
+
+- **新增「文件」页签**（Git 页签右侧，同插件）：工作空间完整文件树（左）+ 文件内容
+  查看/编辑（右）；文本可编辑保存（⌘/Ctrl+S）、图片等常见格式预览、轻量**代码高亮**
+  （JS/TS/JSON/HTML/CSS/MD/Python/YAML/Shell/C 系）、⌘/Ctrl+E 切换编辑/预览。
+- 宿主新增 `/fs` 文件 API（tree / read / write，含越界拦截）；README 中英双语同步。
+- 「文件」页签增强：**一键全部展开 / 全部收起**目录；**代码高亮升级**（状态化分词：块注释、
+  多行字符串、二级关键字、内置类型、属性访问、函数调用等更细着色，JS/TS/JSON/Python/YAML/
+  Shell/C 系关键字更全）。
+- **文本编辑升级为 CodeMirror 6**（VS Code 级）：esbuild 打成**单个自包含 bundle 并内联进
+  git 客户端**（`dsh-client-ui-git/client.js`，~700KB；不引入独立插件/模块，避免 loader
+  入口解析问题），行号/代码折叠/括号匹配/多光标/undo-redo；语言 JS/TS/JSX/TSX/JSON/HTML/CSS/
+  Python/Markdown/YAML/Shell/C/C++/Java/Kotlin/Go。原轻量高亮器保留为兜底。
+- **修复**：文件页签点击文件后整块空白——CodeMirror 6 编辑器原先自带一份内置 React 拷贝，
+  与宿主 React 冲突导致组件树渲染崩溃；已改为**无 React 的命令式 API**
+  （window.DshCodeMirror.create(host, ...)：destroy/setReadOnly/setLanguage/setValue/focus）
+  并保持单文件内联，文件面板改用 ref 宿主 + 生命周期 effect 管理编辑器。
+- **修复**：文件页签「点击编辑后整块空白」——`setReadOnly` 原以 Facet 输入作事务 effect
+  （非法、在 effect 内抛错致 React 卸载子树）；改用 Compartment 重配 `editable`/`readOnly`，
+  只读/可编辑切换不再重建编辑器、不报错。
+- **配色**：编辑器改用 **One Dark** 主题（VS Code 风），适配黑金深色主题；背景透明跟随面板。
+- **Markdown 渲染**：`.md`/`.markdown` 文件预览模式自动渲染为 HTML（GFM、断行、表格/引用/代码块），
+  编辑模式仍显示源码；内置 `marked` 并过滤 `<script>`/`<iframe>`/事件属性以避免执行。
+- **配色微调**：移除与 One Dark 冲突的 `defaultHighlightStyle`（亮色调高亮在深色背景上对比不足），
+  令牌着色统一由 One Dark 提供；编辑器背景由透明改为显式深色（跟随 `--dsw-alias-bg-layer-1`，
+  兜底 `#1a1a1a`），修复进入编辑态时背景变白的问题；`.cm-content/.cm-line/.cm-scroller` 设为透明。

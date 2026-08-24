@@ -187,11 +187,17 @@ $HOME/.nvm/versions/node/v22.19.0/bin/npm install --omit=dev --no-audit --no-fun
 - **面板布局**：第 2 列上方为提交历史（占满剩余高度），最下方为提交表单。
 - **差异视图**：diff 按文件分类展示（文件头 + 新增/删除/重命名/二进制徽标），修改位置
   用绿色/红色色块标出，每行标注新旧行号，hunk 头显示 `@@ -旧行 +新行 @@`。
+- **文件浏览**：页签栏「Git」右侧新增 **「文件」** 页签——左侧为该工作空间的完整文件树
+  （支持**一键全部展开/收起**），右侧显示文件内容；文本编辑基于 **CodeMirror 6**（VS Code 级
+  **语法高亮**与编辑：行号、代码折叠、括号匹配、多光标、undo/redo…支持 JS/TS/JSX/TSX/JSON/
+  HTML/CSS/Python/Markdown/YAML/Shell/C/C++/Java/Kotlin/Go 等），⌘/Ctrl+S 保存、⌘/Ctrl+E
+  切换编辑/预览；图片等常见格式直接预览。编辑器采用 **One Dark** 主题，适配黑金深色。
+  **.md/.markdown** 预览模式自动渲染为 Markdown（GFM、断行、表格/引用/代码块），编辑模式显示源码。
 
 | 文件 | 作用 |
 |---|---|
-| `plugins/dsh-git/` | 宿主半部：`/git` JSON API（status/stage/diff/commit/branch/merge/log/blame/cat 等 28 个操作） |
-| `plugins/dsh-client-ui-git/` | 浏览器半部：侧边栏 Git 入口 + 全屏面板 UI |
+| `plugins/dsh-git/` | 宿主半部：`/git` JSON API（status/stage/diff/commit/branch/merge/log/blame/cat 等 28 个操作）+ `/fs` 文件 API（tree/read/write） |
+| `plugins/dsh-client-ui-git/` | 浏览器半部：Git 页签 + 文件浏览页签 + 全屏面板 UI |
 | `git.patch.yml` | 注册这两个插件（launcher 经 `--patch` 传入） |
 
 **面板效果：**

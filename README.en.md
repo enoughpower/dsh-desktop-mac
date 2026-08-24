@@ -195,11 +195,19 @@ Features:
   form is at the bottom.
 - **Diff view**: diffs grouped by file (file header + add/delete/rename/binary badges); changed lines
   marked green/red; old/new line numbers per row; hunk headers show `@@ -old +new @@`.
+- **Files browser**: a **"Files"** tab sits to the right of "Git" in the tab bar — the full workspace
+  file tree on the left (with **expand-all / collapse-all** buttons), file content on the right. Text
+  editing is powered by **CodeMirror 6** (VS Code-grade **syntax highlighting** & editing: line numbers,
+  code folding, bracket matching, multi-cursor, undo/redo…; JS/TS/JSX/TSX/JSON/HTML/CSS/Python/Markdown/
+  YAML/Shell/C/C++/Java/Kotlin/Go…); ⌘/Ctrl+S saves, ⌘/Ctrl+E toggles edit/preview; images and common
+  formats preview inline. The editor uses the **One Dark** theme to match the black-gold dark theme.
+  **.md/.markdown** files render as Markdown in preview mode (GFM, line breaks, tables/quotes/code blocks);
+  edit mode shows the source.
 
 | File | Role |
 |---|---|
-| `plugins/dsh-git/` | Host half: `/git` JSON API (28 ops: status/stage/diff/commit/branch/merge/log/blame/cat…) |
-| `plugins/dsh-client-ui-git/` | Browser half: Git entry + full-screen panel UI |
+| `plugins/dsh-git/` | Host half: `/git` JSON API (28 ops: status/stage/diff/commit/branch/merge/log/blame/cat…) + `/fs` file API (tree/read/write) |
+| `plugins/dsh-client-ui-git/` | Browser half: Git tab + Files browser tab + full-screen panel UI |
 | `git.patch.yml` | registers these two plugins (via `--patch`) |
 
 **Panel preview:**

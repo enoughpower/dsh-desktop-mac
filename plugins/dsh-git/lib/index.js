@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { rm } from "node:fs/promises";
-import { resolve, sep } from "node:path";
+import { rm, readdir, readFile, writeFile, stat, mkdir } from "node:fs/promises";
+import { resolve, join, relative, basename, extname, dirname, isAbsolute } from "node:path";
 
 const execFileAsync = promisify(execFile);
 
@@ -680,6 +680,108 @@ async function handler(req, res) {
   res.end(JSON.stringify(result));
 }
 
+// ── /fs: workspace file browser / editor API ─────────────────────────────
+const IMAGE_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".avif", ".svg"]);
+const IMAGE_MIME = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp", ".ico": "image/x-icon", ".avif": "image/avif", ".svg": "image/svg+xml" };
+const SKIP_DIRS = new Set(["node_modules", ".git", ".dsh", ".dsh-vision-router", ".DS_Store"]);
+
+function safePath(root, target) {
+  const rel = relative(resolve(root), resolve(target));
+  if (rel === "") return resolve(target);
+  if (rel.startsWith("..") || isAbsolute(rel)) throw new Error("path is outside the workspace root");
+  return resolve(target);
+}
+
+async function fsTree(payload) {
+  const root = resolve(typeof payload.root === "string" && payload.root ? payload.root : process.cwd());
+  const files = [];
+  async function walk(dir, depth) {
+    if (depth > 10) return;
+    let entries;
+    try { entries = await readdir(dir, { withFileTypes: true }); } catch { return; }
+    entries.sort((a, b) => (a.isDirectory() ? 0 : 1) - (b.isDirectory() ? 0 : 1) || a.name.localeCompare(b.name));
+    for (const e of entries) {
+      if (e.name.startsWith(".") && e.name !== ".gitignore") continue;
+      if (e.isDirectory() && SKIP_DIRS.has(e.name)) continue;
+      const full = join(dir, e.name);
+      if (e.isDirectory()) {
+        files.push({ name: e.name, path: full, type: "dir" });
+        await walk(full, depth + 1);
+      } else if (e.isFile()) {
+        let size = 0;
+        try { size = (await stat(full)).size; } catch {}
+        files.push({ name: e.name, path: full, type: "file", size });
+      }
+    }
+  }
+  await walk(root, 0);
+  return ok({ root, files });
+}
+
+async function fsRead(payload) {
+  const root = resolve(typeof payload.root === "string" && payload.root ? payload.root : process.cwd());
+  const file = safePath(root, requireString(payload, "path"));
+  const ext = extname(file).toLowerCase();
+  try {
+    const buf = await readFile(file);
+    if (IMAGE_EXT.has(ext)) {
+      return ok({ type: "image", mediaType: IMAGE_MIME[ext] || "image/png", base64: buf.toString("base64") });
+    }
+    const text = buf.toString("utf8");
+    if (/\uFFFD/.test(text.slice(0, 8192))) {
+      return ok({ type: "binary", size: buf.length });
+    }
+    return ok({ type: "text", text });
+  } catch (error) {
+    return fail("fs-error", error?.message || String(error));
+  }
+}
+
+async function fsWrite(payload) {
+  const root = resolve(typeof payload.root === "string" && payload.root ? payload.root : process.cwd());
+  const file = safePath(root, requireString(payload, "path"));
+  const content = typeof payload.content === "string" ? payload.content : "";
+  try {
+    await mkdir(dirname(file), { recursive: true });
+    await writeFile(file, content, "utf8");
+    return ok({ written: file });
+  } catch (error) {
+    return fail("fs-error", error?.message || String(error));
+  }
+}
+
+const fsHandlers = { tree: fsTree, read: fsRead, write: fsWrite };
+
+async function fsHandler(req, res) {
+  if (req.method !== "POST") {
+    res.writeHead(405, { "content-type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify(fail("method", "POST required")));
+    return;
+  }
+  let body;
+  try { body = await readBody(req); } catch (error) {
+    res.writeHead(413, { "content-type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify(fail("body", error.message)));
+    return;
+  }
+  let payload;
+  try { payload = JSON.parse(body || "{}"); } catch {
+    res.writeHead(400, { "content-type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify(fail("bad-json", "invalid JSON body")));
+    return;
+  }
+  const fn = typeof payload.op === "string" ? fsHandlers[payload.op] : undefined;
+  if (fn === undefined) {
+    res.writeHead(400, { "content-type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify(fail("bad-op", "unknown fs op " + JSON.stringify(payload.op))));
+    return;
+  }
+  let result;
+  try { result = await fn(payload); } catch (error) { result = fail("internal", error?.message ?? String(error)); }
+  res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+  res.end(JSON.stringify(result));
+}
+
 function apply(ctx) {
   ctx.effect(
     () =>
@@ -688,7 +790,12 @@ function apply(ctx) {
         path: "/git",
         handler,
       }),
-    "dsh-git: /git route",
+      ctx.webServer.register({
+        kind: "exact",
+        path: "/fs",
+        handler: fsHandler,
+      }),
+    "dsh-git: /git + /fs routes",
   );
 }
 
