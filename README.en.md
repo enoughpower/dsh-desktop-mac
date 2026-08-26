@@ -204,6 +204,10 @@ Features:
   formats preview inline. The editor uses the **One Dark** theme to match the black-gold dark theme.
   **.md/.markdown** files render as Markdown in preview mode (GFM, line breaks, tables/quotes/code blocks);
   edit mode shows the source.
+  > No freeze on huge change-sets: git itself answers in milliseconds for thousands of files — the
+  > freeze came from the client rendering *every* file as a full DOM row. Each status section now
+  > renders only the first 600 rows and the Files tree caps at 1200 items, folding the rest behind a
+  > "…N more (click to expand all)" row, so huge workspaces stay responsive.
 
 | File | Role |
 |---|---|
@@ -355,6 +359,9 @@ same interface in real time**:
 - **Desktop adaptation**: the desktop app injects `dsh-desktop-mode=compatibility`, so the
   QR mirror works out of the box; the plugin's in-page "update / restart" actions are disabled
   in the desktop build (managed by the app). If port 3081 is taken the proxy auto-switches.
+- **Trimmed tabs on phone**: the "Git" and "文件" (Files) tabs are hidden when accessed from a
+  phone (the Git client skips registering them when the URL carries dsh-desktop-mode), so they
+  don't collide with the mobile drawer layout; the desktop app is unaffected.
 
 | File | Role |
 |---|---|

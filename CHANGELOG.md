@@ -51,3 +51,23 @@
   支持移动端抽屉布局。桌面版自动兼容（插件内更新/重启项停用；注入 dsh-desktop-mode=compatibility）。
   宿主运行时依赖 qrcode 一并打包；pocket.patch.yml 注册（name 带引号以便 linkBundledPlugins 软链）；
   dsh-pocket@1.14.5（GPL-2.0）。
+- **手机端隐藏 Git / 文件页签**：手机经 dsh-pocket 代理访问时 URL 带 `dsh-desktop-mode`
+  参数，Git 客户端据此跳过「Git」「文件」两个 conversation.view 页签的注册，避免与移动端
+  抽屉布局叠加；桌面壳直接加载 127.0.0.1（无该参数）不受影响。
+- **新增 dsh-pet 插件（桌面宠物）**：Web UI 上浮动一只蓝鲸桌宠——待机呼吸、随机转身/
+  游走/动作、点击互动、余额动画、通知反馈等（97 个动画素材 + 自定义字体随包打包）。宿主半
+  经 `/dsh-pet-7340` 路由提供素材与配置，浏览器半为宠物渲染层；注册 pet.patch.yml（name
+  带引号）。dsh-pet@0.2.0（MIT）。
+- **修复：桌宠黑底**——桌面版用 WKWebView（WebKit 内核），dsh-pet 默认的 `.webm` 是
+  VP9-alpha 编码（仅 Chrome/Edge/Firefox 支持透明），WebKit 不识别致黑底。改用
+  `dsh-pet@hevc` 版（0.2.0-hevc）：97 个 `.mov`（HEVC with Alpha，hvc1/hvcC），`THUMB_EXT`
+  设为 `.mov`，桌宠透明浮于界面。
+- **修复：新增文件多时 Git/文件页卡死**——卡死是**客户端渲染**瓶颈而非 git 本身（git
+  status 对数千文件毫秒级返回）：每个新增文件都渲染一个含 checkbox/状态/路径按钮/⋯ 菜单的
+  `<li>`，数千文件 = 数万 DOM 节点，React 提交/重排阻塞主线程（且在提交框每敲一键都会全量
+  重建）。修复：每个状态区块只渲染前 600 行，其余折叠成「还有 N 个未显示（点击展开全部）」
+  按钮；「文件」页签树同样截断到 1200 项并附展开按钮。
+- **dsh-pet 改为用户插件**：不再打进应用包（从 `plugins/dsh-pet/` 与 `pet.patch.yml` 移除，
+  应用体积 370M → 242M）。改为运行时装入桌面用户 profile
+  （`$DSH_HOME/profiles/web/node_modules/dsh-pet@0.2.0-hevc`，经 `add-plugin.sh --runtime`），
+  dsh-pet 作为 bundle 插件自动进 profile bundles 层；应用重建/升级不清除用户已装插件。

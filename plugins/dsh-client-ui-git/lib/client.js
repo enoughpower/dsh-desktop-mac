@@ -706,6 +706,10 @@ window.__ModuleLoader__.load({
       const [conflicts, setConflicts] = react.useState([]);
       const [pathInput, setPathInput] = react.useState("");
       const [menuFor, setMenuFor] = react.useState(null); // 文件行 "⋯" 菜单打开的行 path
+      // 文件太多时全量渲染会让 React 提交数万 DOM 节点、主线程卡死（git 本身很快）。
+      // 每个状态区块只渲染前 MAX_RENDER 行，其余折叠成「还有 N 个」展开按钮。
+      const MAX_RENDER = 600;
+      const [showAllFiles, setShowAllFiles] = react.useState(false);
 
       // 点击页面任意处关闭文件行菜单。注意：必须用冒泡阶段并忽略菜单内部的点击，
       // 若用捕获阶段，document 捕获监听会在菜单项自己的 onClick 之前触发
@@ -937,6 +941,21 @@ window.__ModuleLoader__.load({
         if (newName && newName.trim()) {
           await runMutation("renameBranch", { oldName, name: newName.trim() });
         }
+      };
+
+      // Cap one status section: render at most MAX_RENDER rows, then a single
+      // "还有 N 个未显示（点击展开）" row. Keeps DOM small so thousands of new
+      // files don't freeze the app (git itself resolves this instantly).
+      const capRows = (items, renderRow) => {
+        const total = Array.isArray(items) ? items.length : 0;
+        if (total === 0) return [];
+        const shown = showAllFiles ? items : items.slice(0, MAX_RENDER);
+        const rows = shown.map(renderRow);
+        const hidden = total - shown.length;
+        if (hidden > 0) {
+          rows.push(jsx("li", { key: "__more__", className: "dshGitMore", onClick: () => setShowAllFiles(true), style: { cursor: "pointer" }, children: "…还有 " + hidden + " 个未显示（点击展开全部）" }));
+        }
+        return rows;
       };
 
       const fileRow = (f, isStaged) => {
@@ -1226,7 +1245,7 @@ jsxs("div", { className: "dshGitCol", style: { width: 300, flex: "0 0 300px" }, 
                     jsx("h4", { children: "变更文件（" + (commitFiles ? commitFiles.length : 0) + "）" }),
                     commitFiles === null || commitFiles.length === 0
                       ? jsx("div", { className: "dshGitEmpty", children: "该提交无文件变更" })
-                      : jsx("ul", { className: "dshGitList", children: commitFiles.map((f) => commitFileRow(f)) }),
+                      : jsx("ul", { className: "dshGitList", children: capRows(commitFiles, (f) => commitFileRow(f)) }),
                   ] }),
                 ] })
               : jsxs(Fragment, { children: [
@@ -1234,7 +1253,7 @@ jsxs("div", { className: "dshGitCol", style: { width: 300, flex: "0 0 300px" }, 
               jsx("h4", { children: "已暂存（" + staged.length + "）" }),
               staged.length === 0
                 ? jsx("div", { className: "dshGitEmpty", children: "无已暂存文件" })
-                : jsx("ul", { className: "dshGitList", children: staged.map((f) => fileRow(f, true)) }),
+                : jsx("ul", { className: "dshGitList", children: capRows(staged, (f) => fileRow(f, true)) }),
             ] }),
             jsxs("div", { className: "dshGitSection", children: [
               jsx("h4", { children: [
@@ -1258,10 +1277,10 @@ jsxs("div", { className: "dshGitCol", style: { width: 300, flex: "0 0 300px" }, 
               ] }),
               unstaged.length + untracked.length === 0
                 ? jsx("div", { className: "dshGitEmpty", children: "工作区干净" })
-                : jsx("ul", { className: "dshGitList", children: [
-                    ...unstaged.map((f) => fileRow(f, false)),
-                    ...untracked.map((f) => fileRow({ ...f, status: "??" }, false)),
-                  ] }),
+                : jsx("ul", { className: "dshGitList", children: capRows(
+                    [...unstaged, ...untracked.map((f) => ({ ...f, status: "??" }))],
+                    (f) => fileRow(f, false),
+                  ) }),
             ] }),
           ] }),
 
@@ -1441,6 +1460,8 @@ jsx("textarea", {
       const [collapsed, setCollapsed] = react.useState(() => new Set());
       const [error, setError] = react.useState(null);
       const [saved, setSaved] = react.useState(null);
+      // 文件树也按 MAX_RENDER 截断渲染，避免大工作区（数千文件）提交巨量 DOM 卡死。
+      const [fsShowAll, setFsShowAll] = react.useState(false);
       const cmHost = react.useRef(null);
       const cmInst = react.useRef(null);
 
@@ -1522,7 +1543,9 @@ jsx("textarea", {
         return false;
       };
 
-      const rows = files.map((f) => {
+      const fsCap = fsShowAll ? files : files.slice(0, 1200);
+      const fsHidden = files.length - fsCap.length;
+      const rows = fsCap.map((f) => {
         const depth = relDepth(f.path);
         const hidden = isHidden(f.path);
         const isOpen = selected === f.path;
@@ -1537,6 +1560,7 @@ jsx("textarea", {
           jsx("span", { className: "dshFsFname", children: f.name }),
         ] });
       });
+      if (fsHidden > 0) rows.push(jsx("div", { key: "__fsmore__", className: "dshFsRow dshFsFile dshFsMore", style: { paddingLeft: 26 + relDepth(files[0]?.path || "") * 14, cursor: "pointer" }, onClick: () => setFsShowAll(true), children: "…还有 " + fsHidden + " 项未显示（点击展开全部）" }));
 
       let pane;
       if (!selected) {
@@ -1589,6 +1613,12 @@ jsx("textarea", {
     const inject = ["slots"];
 
     function apply(ctx) {
+      // 手机经 dsh-pocket 代理访问时，URL 会被注入 dsh-desktop-mode（history.replaceState
+      // 补齐，compatibility 模式）；桌面壳直接加载 127.0.0.1 无该参数。手机窄屏下
+      // Git / 文件页签没有意义（且与移动端抽屉布局叠加），这里按参数判断跳过注册。
+      const pocketPhone = (typeof location !== "undefined") &&
+        new URLSearchParams(location.search).has("dsh-desktop-mode");
+      if (pocketPhone) return;
       // Git becomes a conversation view tab ("对话轨迹" right side): clicking
       // it replaces the chat/trajectory area with the Git page. The old
       // sidebar-footer entry has been removed.
