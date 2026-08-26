@@ -45,3 +45,9 @@
 - **配色微调**：移除与 One Dark 冲突的 `defaultHighlightStyle`（亮色调高亮在深色背景上对比不足），
   令牌着色统一由 One Dark 提供；编辑器背景由透明改为显式深色（跟随 `--dsw-alias-bg-layer-1`，
   兜底 `#1a1a1a`），修复进入编辑态时背景变白的问题；`.cm-content/.cm-line/.cm-scroller` 设为透明。
+- **新增 dsh-pocket 插件（手机访问）**：设置页新增「手机访问」入口——局域网二维码（同一 WiFi
+  手机扫码即开，独立 8 位密码，可关/可自定义）与可选的 cloudflared 公网隧道（公网二维码 +
+  8 位密码，默认每次开启自动换新）；手机看到的即电脑上的 dsh web 界面，WebSocket 实时同屏，
+  支持移动端抽屉布局。桌面版自动兼容（插件内更新/重启项停用；注入 dsh-desktop-mode=compatibility）。
+  宿主运行时依赖 qrcode 一并打包；pocket.patch.yml 注册（name 带引号以便 linkBundledPlugins 软链）；
+  dsh-pocket@1.14.5（GPL-2.0）。

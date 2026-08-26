@@ -56,6 +56,7 @@ desktop/
 ├── prune.patch.yml         # 禁用被裁剪掉的插件行（llm-pi-ai、telemetry）
 ├── git.patch.yml           # 注册内置 Git 插件
 ├── billing.patch.yml       # 注册内置费用插件 dsh-cost-meter
+├── pocket.patch.yml        # 注册内置手机访问插件 dsh-pocket
 ├── updater.patch.yml       # 注册内置版本号/检查更新插件
 ├── skills-hub.patch.yml   # 注册内置全局技能库插件 dsh-skills
 ├── mcp-settings.patch.yml  # 注册内置 MCP 服务管理插件
@@ -323,6 +324,31 @@ v1.5.38），提供会话级费用统计：
 |---|---|
 | `plugins/dsh-cost-meter/` | 插件源码（宿主：costMeter 服务 + ledger；浏览器半：费用展示与设置） |
 | `billing.patch.yml` | 注册该插件（launcher 经 `--patch` 传入；`name:` 必须带引号，linkBundledPlugins 只收集带引号的 name） |
+
+
+## 手机访问（dsh-pocket）
+
+内置 **dsh-pocket**（[shaobeichen/dsh-pocket](https://github.com/shaobeichen/dsh-pocket)，
+v1.14.5，GPL-2.0），把 DSH「装进口袋」——**手机扫二维码实时同屏**电脑上的界面：
+
+- **局域网扫码**：设置 → **手机访问**，同一 WiFi 下手机扫码即开（自动识别本机局域网 IP；
+  独立 8 位数字密码，默认开启，可一键关闭或自定义）。
+- **公网扫码**：点「开启公网访问」→ cloudflared 快速隧道（首次自动下载）→ 出公网二维码，
+  人在外面（4G / 任何网络）也能访问；公网有独立 8 位密码（默认每次开启自动换新，可自定义）。
+- **实时同屏**：手机看到的就是电脑上的 dsh web 界面，WebSocket 全透传、双向操作，窄屏自动
+  变移动端抽屉布局；内置心跳保活与断线重连、响应 gzip/brotli 压缩。
+- **桌面版适配**：桌面端自动注入 dsh-desktop-mode=compatibility，扫码同屏正常可用；
+  插件内「更新 / 重启」两项在桌面版自动停用（由应用统一管理）。端口冲突（3081 被占）时
+  代理自动换端口，无需干预。
+
+| 文件 | 作用 |
+|---|---|
+| `plugins/dsh-pocket/` | 插件源码（宿主：改头反向代理 + 二维码 + 隧道；浏览器半：设置页「手机访问」+ 移动端适配） |
+| `pocket.patch.yml` | 注册该插件（launcher 经 `--patch` 传入；`name:` 带引号以便 linkBundledPlugins 软链） |
+
+> ⚠️ **安全**：DSH 能执行电脑上的代码。局域网/公网链接都配独立 8 位密码才可访问，请勿把
+> 二维码 / URL / 密码发给他人；开启公网前会强制弹出安全免责声明，用完建议及时关闭。
+> 登录状态绑定电脑上的 dsh web 进程——应用重启 / 更新后手机需重新输入一次密码。
 
 
 launcher 还会把后端目录（含内置 `node` 二进制）放在 `PATH` 最前，确保插件跑视觉

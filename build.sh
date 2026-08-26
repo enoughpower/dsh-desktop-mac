@@ -183,6 +183,7 @@ cp "$ROOT/skills-hub.patch.yml" "$BACKEND/skills-hub.patch.yml"
 cp "$ROOT/mcp-settings.patch.yml" "$BACKEND/mcp-settings.patch.yml"
 cp "$ROOT/vision.patch.yml" "$BACKEND/vision.patch.yml"
 cp "$ROOT/theme-blackgold.patch.yml" "$BACKEND/theme-blackgold.patch.yml"
+cp "$ROOT/pocket.patch.yml" "$BACKEND/pocket.patch.yml"
 
 # --- 4. compile the native WKWebView shell ---------------------------------
 echo "==> compiling Swift shell"

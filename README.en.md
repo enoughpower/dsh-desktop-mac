@@ -59,6 +59,7 @@ desktop/
 ├── prune.patch.yml         # disables pruned plugin rows (llm-pi-ai, telemetry)
 ├── git.patch.yml           # registers the built-in Git plugin
 ├── billing.patch.yml       # registers the cost plugin dsh-cost-meter
+├── pocket.patch.yml        # registers the phone-access plugin dsh-pocket
 ├── updater.patch.yml       # registers the version/update-check plugin
 ├── skills-hub.patch.yml   # registers the global skills library plugin dsh-skills
 ├── mcp-settings.patch.yml  # registers the MCP service management plugin
@@ -334,6 +335,38 @@ v1.5.38), providing session-level cost stats:
 |---|---|
 | `plugins/dsh-cost-meter/` | plugin source (host: costMeter service + ledger; browser: cost display & settings) |
 | `billing.patch.yml` | registers the plugin (via `--patch`; the `name:` must be quoted — linkBundledPlugins only collects quoted names) |
+
+
+## Phone Access (dsh-pocket)
+
+Bundled **dsh-pocket** ([shaobeichen/dsh-pocket](https://github.com/shaobeichen/dsh-pocket),
+v1.14.5, GPL-2.0) puts DSH "in your pocket" — **scan a QR code with your phone and see the
+same interface in real time**:
+
+- **LAN QR code**: Settings → **Phone Access** — phones on the same Wi-Fi scan to open
+  (auto-detects the LAN IP; a separate 8-digit PIN, enabled by default, can be disabled or
+  customized).
+- **Public QR code**: click "Enable public access" → cloudflared quick tunnel (downloaded on
+  first use) → public QR code for use anywhere (4G / any network); the public link has its own
+  8-digit PIN (rotated on every enable by default, customizable).
+- **Real-time mirror**: the phone shows the same dsh web UI as the computer — WebSocket
+  pass-through, two-way control, narrow screens switch to a mobile drawer layout; heartbeat
+  keep-alive with auto-reconnect, gzip/brotli response compression.
+- **Desktop adaptation**: the desktop app injects `dsh-desktop-mode=compatibility`, so the
+  QR mirror works out of the box; the plugin's in-page "update / restart" actions are disabled
+  in the desktop build (managed by the app). If port 3081 is taken the proxy auto-switches.
+
+| File | Role |
+|---|---|
+| `plugins/dsh-pocket/` | plugin source (host: Host/Origin-rewriting reverse proxy + QR codes + tunnel; browser: Settings → Phone Access + mobile adaptation) |
+| `pocket.patch.yml` | registers the plugin (via `--patch`; quoted `name:` so linkBundledPlugins links it into the profile) |
+
+> ⚠️ **Security**: DSH can execute code on your computer. Both the LAN and public links are
+> gated by a separate 8-digit PIN — don't share QR codes / URLs / PINs with others; a security
+> disclaimer is enforced before enabling public access; close it when done.
+> The login session is bound to the computer's dsh web process — after the app restarts or
+> updates, the phone must re-enter the PIN once.
+
 
 The launcher also prepends the backend dir (with the bundled `node` binary) to PATH, so vision subprocesses
 use the app's own Node rather than a possibly-broken system Node.
