@@ -15,13 +15,13 @@ import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { writeFile, readFile, mkdir, rm } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomInt } from 'node:crypto';
 
 import { createPocketService } from './service.mjs';
 import { installPocketRpc } from './web-rpc.js';
 import { restartHost } from './restart.js';
-import { desktopEnvPatchScript, advancedNoticeScript, DEFAULT_INJECT } from './proxy.mjs';
-import { lanEnabled, setLanEnabled, lanAuthEnabled, setLanAuthEnabled, lanIpOverride, setLanIpOverride, pinCustom, setPinCustom } from './settings.mjs';
+import { advancedNoticeScript, DEFAULT_INJECT, classifyHost } from './proxy.mjs';
+import { lanEnabled, setLanEnabled, lanAuthEnabled, setLanAuthEnabled, lanIpOverride, setLanIpOverride, pinCustom, setPinCustom, tunnelMode, setTunnelMode, tunnelToken, setTunnelToken, tunnelHostname, setTunnelHostname, resetSettings, proxyPort, cloudflaredPath } from './settings.mjs';
 
 const name = 'dsh-pocket';
 const inject = ['connection', 'webServer'];
@@ -44,12 +44,13 @@ function currentVersion() {
 const loadedVersion = currentVersion();
 
 // ---------- 访问密码（issue #13 + #18 + #33） ----------
-// 公网与局域网**分开**：各自 8 位数字，存本机 $DSH_HOME/dsh-pocket/。
+// 公网与局域网**分开**：各自 8 位，存本机 $DSH_HOME/dsh-pocket/。
 // 公网密码（token）：默认每次开启公网时轮换（旧链接作废）；**用户自定义后不再轮换**；
 // 局域网密码（token-lan）：默认手动刷新（设置页按钮）；自定义后刷新会换回随机值。
 // 会话保持（issue #33）：登录 cookie 绑定进程级 sessionKey（见 apply）——
 // dsh web 重启/更新后 sessionKey 变化 → 手机需重新输入。
-const PIN_RE = /^\d{8}$/;
+// 密码规则：8 位英文字母（大小写）或数字（自动生成的为 8 位数字，自定义可为字母+数字）。
+const PIN_RE = /^[a-zA-Z0-9]{8}$/;
 function writePinToFile(p, fresh) {
   try {
     mkdirSync(dirname(p), { recursive: true });
@@ -64,8 +65,15 @@ function readPin(p) {
   } catch { /* 无文件 */ }
   return null;
 }
+/**
+ * 生成 8 位访问 PIN（issue #90）。
+ * 必须用 CSPRNG。语言内置的非加密随机数（V8 的 xorshift128+）是可预测的：拿到少量
+ * 输出即可还原内部状态并推算后续值——用它生成访问密码，等于把 9×10⁷ 的搜索空间
+ * 进一步压缩。`randomInt(min, max)` 上界开区间，取值 10000000..99999999。
+ * test/auth-routing.test.js 有源码守卫，禁止这里再出现非加密随机数调用。
+ */
 function newPin() {
-  return String(Math.floor(10000000 + Math.random() * 90000000));
+  return String(randomInt(10_000_000, 100_000_000));
 }
 
 // --- 公网密码 ---
@@ -97,18 +105,44 @@ function refreshLanToken() {
   setPinCustom('lan', false);
   return writePinToFile(lanTokenPath(), newPin());
 }
-/** 按 Host 分发的访问密码：公网隧道用公网密码，局域网用局域网密码。 */
-function tokenForHost(host) {
-  return /trycloudflare\.com$/i.test(String(host ?? '')) ? getAccessToken() : getLanToken();
+/**
+ * 按 Host 分发的访问密码（issue #66：fail closed）。
+ * 公网 = classifyHost 判为 public 的 Host（trycloudflare **或用户自建命名隧道的任意固定域名**），
+ * 一律校验公网密码；loopback/局域网（私网 IP、.local 等）才走局域网密码——
+ * 自建隧道 + 关闭局域网密码不再出现公网裸奔。
+ */
+export function tokenForHost(host) {
+  if (isLanOverrideHost(host)) return getLanToken();
+  return classifyHost(host) === 'public' ? getAccessToken() : getLanToken();
+}
+/** 去掉 Host 的端口（与 classifyHost 一致），用于和手动设置的局域网地址比较。 */
+function hostNameOnly(host) {
+  let name = String(host ?? '').trim().toLowerCase();
+  if (name.startsWith('[')) {
+    const end = name.indexOf(']');
+    if (end >= 0) name = name.slice(1, end);
+  } else {
+    name = name.replace(/:\d+$/, '');
+  }
+  return name;
 }
 /**
- * 用户自定义访问密码（issue #33）：公网/局域网各自设一个固定的 8 位数字。
+ * 用户手动指定的「局域网地址」覆盖（issue #79）：无论什么网段（含 Radmin 26.x 等任意 overlay），
+ * 一律按局域网密码/开关裁决。优先级高于 classifyHost——避免某 overlay 地址落在公网判定里、
+ * 导致局域网入口被错判成公网、比对成公网密码而永远「密码错误」。
+ */
+export function isLanOverrideHost(host) {
+  const override = lanIpOverride().trim().toLowerCase();
+  return override.length > 0 && hostNameOnly(host) === override;
+}
+/**
+ * 用户自定义访问密码（issue #33）：公网/局域网各自设一个固定的 8 位密码（英文字母大小写或数字）。
  * 自定义后公网开启时不再自动轮换（rotateAccessToken 见上）。
- * 非法输入（非 8 位数字）抛错，由 RPC 层转成错误响应。
+ * 非法输入（非 8 位、含字母数字以外字符）抛错，由 RPC 层转成错误响应。
  */
 export function setCustomPin(which, value) {
   const v = String(value ?? '').trim();
-  if (!PIN_RE.test(v)) throw new Error('密码必须是 8 位数字 | PIN must be exactly 8 digits');
+  if (!PIN_RE.test(v)) throw new Error('密码必须是 8 位英文字母或数字 | PIN must be exactly 8 characters (letters and digits only)');
   if (which === 'public') {
     writePinToFile(tokenPath(), v);
     setPinCustom('public', true);
@@ -120,6 +154,24 @@ export function setCustomPin(which, value) {
     return v;
   }
   throw new Error('未知密码类型 | unknown PIN kind');
+}
+
+/**
+ * 恢复出厂设置（设置页底部按钮）：清空本机设置 + 重设随机访问密码。
+ *
+ * 删除 settings.json → 所有开关回到默认（局域网访问开、访问密码开、局域网地址自动、
+ * 公网模式随机、固定域名/Tunnel Token 清空）；公网与局域网密码都换新随机 8 位值
+ * （旧密码立即作废，手机需重新输入）。只动 $DSH_HOME/dsh-pocket/ 下的文件，
+ * DSH 自身的会话、模型、插件配置不受影响。
+ *
+ * 注意：调用方应先停掉正在运行的公网隧道（RPC 层已处理），避免重置后仍按旧模式连接。
+ * @returns {{accessToken:string, lanToken:string}} 重置后的新密码
+ */
+export function resetPocketState() {
+  resetSettings();
+  writePinToFile(tokenPath(), newPin());
+  writePinToFile(lanTokenPath(), newPin());
+  return { accessToken: getAccessToken(), lanToken: getLanToken() };
 }
 
 const restartNoticeRel = join('dsh-pocket', 'restarted.json');
@@ -196,6 +248,15 @@ export function apply(ctx, config = {}, internals = {}) {
     return () => {};
   }
 
+  // cloudflared 自定义路径（issue #45）：远程 Linux 服务器下载源全失败时，
+  // 让用户能在 settings.json 写死一个已经存在的二进制路径，绕过自动下载。
+  // 同步到 env 让 lib/tunnel.mjs 的 resolveCloudflared 第一时间读到。
+  const cfPath = cloudflaredPath();
+  if (cfPath) {
+    process.env.DSH_POCKET_CLOUDFLARED = cfPath;
+    logger.info(`dsh-pocket: using custom cloudflared at ${cfPath} (skipping auto-download) | 使用自定义 cloudflared 路径（跳过自动下载）`);
+  }
+
   // 桌面端环境识别（官方兼容模式，见 desktop 的 plugin-development.md）：
   // desktopProfiles / desktopPnpm 只在 DSH Desktop（Electron）里存在。
   // 桌面端有自己的更新/进程管理，我们这两项功能在此环境**关闭**（不删除），
@@ -222,29 +283,62 @@ export function apply(ctx, config = {}, internals = {}) {
 
   const service = internals.service ?? createPocketService({
     dshPort,
-    port: internals.port ?? config.port ?? 3081,
+    // 端口（issue #70）：插件模式优先级 settings.proxyPort > cordis patch config.port > 3081。
+    // 3081 被占时 createPocketService 内部 EADDRINUSE 抛错，按 DSH 插件启动失败处理（用户改端口重启即可）。
+    port: internals.port ?? config.port ?? (proxyPort() || 3081),
     home: internals.home,
     internals,
     getLanIpOverride: () => lanIpOverride(),
     getLanEnabled: () => lanEnabled(),
-    // 桌面端：手机扫码访问的页面缺 dsh-desktop-mode/platform 参数会让 dsh-plugin-desktop
-    // client 崩溃（issue #3/#4）。给代理注入「桌面参数补丁」（history.replaceState 补齐参数，
-    // 无跳转；compatibility 模式不套桌面布局，避免移动端按钮叠加）。保留默认 polyfill。
-    // advanced 模式再加警告覆盖层（issue #19）。
+    // 桌面端**不再**注入 dsh-desktop-* 标记（issue #76）：
+    //   - 旧版 dsh-plugin-desktop 缺 mode/platform 会抛错，当初正是为此加了补丁（issue #3/#4）；
+    //   - 但 2.0.3 起，mode 与 platform **同时缺失**时 parseDesktopClientEnvironment 直接返回
+    //     undefined（视作非桌面外壳，跳过全部桌面逻辑），正是手机页需要的效果；
+    //   - 反之只要 URL 上出现任一 dsh-desktop-* 标记，客户端就会强制校验整组
+    //     （material + semver version + mica），只补两个必然抛 "invalid or missing
+    //     dsh-desktop-material" → 插件树加载失败 → 页面变成「打开恢复模式」；
+    //   - 更糟的是 decideDesktopBrowserAccess 见到 dsh-desktop-* 前缀就把没有渲染器 token 的
+    //     普通浏览器判为 denied（403），刷新后直接打不开。
+    // 结论：手机/浏览器访问一律不带这些标记，advanced 模式另加警告覆盖层（issue #19）。
     injectHtml: isDesktop
-      ? DEFAULT_INJECT + desktopEnvPatchScript(process.platform) + (desktopAdvanced ? advancedNoticeScript() : '')
+      ? DEFAULT_INJECT + (desktopAdvanced ? advancedNoticeScript() : '')
       : undefined,
-    // 访问密码（issue #13 + #18 + #24 + #33）：公网永远要密码（默认每次开启变新，
+    // 访问密码（issue #13 + #18 + #24 + #33 + #66）：公网永远要密码（默认每次开启变新，
     // 用户自定义后不再轮换）；局域网按开关（默认开启；关闭后局域网扫码直连）。
+    // 公网的判定是 fail closed：除了 loopback/私网 Host，一切陌生域名（含自建
+    // 命名隧道的固定域名）都按公网处理、强制公网密码。
     auth: {
       // sessionKey：进程级随机密钥——登录 cookie 绑定它（会话保持，issue #33）：
       // dsh web 重启/更新后 sessionKey 变化 → 手机需重新输入
       sessionKey: randomBytes(16).toString('hex'),
       getToken: (host) => tokenForHost(host),
-      isProtected: (host) => /trycloudflare\.com$/i.test(String(host ?? '')) ? true : lanAuthEnabled(),
+      isProtected: (host) => {
+        if (isLanOverrideHost(host)) return lanAuthEnabled();
+        return classifyHost(host) === 'public' ? true : lanAuthEnabled();
+      },
     },
-    // 每次公网隧道就绪 → 轮换 8 位密码（旧密码/旧链接立即作废；用户自定义后不轮换）
-    onTunnelReady: () => {
+    // dsh web 浏览器会话启动 token（issue #77）：新版 dsh（>= 0.1.2-alpha.1）要求根路径
+    // 带一次 `?token=` 换 cookie，否则 /api 与 WebSocket 全 401。token 每次进程启动都变，
+    // 所以每次请求实时从 connection 服务取；老版本没有这个方法 → 返回空，行为不变。
+    launchToken: () => {
+      try {
+        const fn = ctx.connection?.authenticatedUrl;
+        if (typeof fn !== 'function') return '';
+        const url = new URL(fn.call(ctx.connection, `http://127.0.0.1:${dshPort}`));
+        return url.searchParams.get('token') ?? '';
+      } catch {
+        return '';
+      }
+    },
+    // 隧道模式（issue #66）：'quick'（默认，随机 trycloudflare.com）| 'named'（固定域名）
+    getTunnelConfig: () => ({ mode: tunnelMode(), token: tunnelToken(), hostname: tunnelHostname() }),
+    // 隧道就绪回调：快速模式每次开启轮换 8 位密码（旧链接作废）；命名模式地址固定，
+    // 不自动轮换（重启后密码不变，用户可用「自定义密码」主动更换）。
+    onTunnelReady: (mode) => {
+      if (mode === 'named') {
+        logger.info('dsh-pocket: named tunnel ready — PIN not rotated | 命名隧道就绪（公网密码不自动轮换）');
+        return getAccessToken();
+      }
       const fresh = rotateAccessToken();
       logger.info('dsh-pocket: public access PIN refreshed | 公网访问密码已更新（自定义密码不受影响）');
       return fresh;
@@ -266,6 +360,18 @@ export function apply(ctx, config = {}, internals = {}) {
     setLanIpOverride: (ip) => setLanIpOverride(ip),
     getPinCustom: (which) => pinCustom(which),
     setCustomPin: (which, value) => setCustomPin(which, value),
+    // 命名隧道配置（issue #66）：RPC 只回显脱敏视图（token 只写不读）
+    getTunnelConfig: () => ({ mode: tunnelMode(), hostname: tunnelHostname(), tokenSet: tunnelToken().length > 0 }),
+    // 恢复出厂设置：清空设置文件 + 重设随机密码（RPC 层已先停掉公网隧道）
+    resetPocket: () => resetPocketState(),
+    setTunnelConfig: ({ mode, hostname, token } = {}) => {
+      const m = mode === undefined ? tunnelMode() : mode;
+      if (m !== 'quick' && m !== 'named') throw new Error('未知隧道模式 | unknown tunnel mode');
+      setTunnelMode(m);
+      if (hostname !== undefined) setTunnelHostname(hostname);
+      if (token !== undefined) setTunnelToken(token);
+      return { mode: tunnelMode(), hostname: tunnelHostname(), tokenSet: tunnelToken().length > 0 };
+    },
     runUpdate: internals.runUpdate ?? { currentVersion, perform: performUpdate, loadedVersion: () => loadedVersion },
     restart: internals.restart ?? (() => pocketRestart(service)),
     restartNotice: internals.restartNotice ?? consumeRestartNotice,

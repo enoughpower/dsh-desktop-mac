@@ -3,9 +3,12 @@ import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import { MobileNavToggle } from './MobileNavToggle.tsx'
 import { MobileNavOverlay } from './MobileNavOverlay.tsx'
 import { MobileDrawerFooter } from './MobileDrawerFooter.tsx'
+import { startFileGuard } from './fileGuard.ts'
 import { MOBILE_CSS } from './mobile.css.ts'
+import { POCKET_RPC_CHANNEL, POCKET_ENDPOINTS } from '../api.js'
 import { NS, en, zh } from './locales.ts'
 import type { MobileNavKey } from './locales.ts'
+import { resolveLayout, persistLayoutFromUrl } from './layout-mode.mjs'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
@@ -23,6 +26,22 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
  * @param ctx - client root context.
  */
 export function mobileApply(ctx): void {
+  // 布局模式（issue #74）：URL 参数 > localStorage > auto(=matchMedia)。
+  // desktop 模式（宽屏手机/平板强制电脑布局）下整段 mobile 效果都不挂——
+  // 不加 styles、不挂 slots、不跑 effects，直接走 DSH 原生桌面 UI。
+  const urlValue = new URL(window.location.href).searchParams.get('dsh-layout') ?? '';
+  const narrowMQ = window.matchMedia('(max-width: 1023px)');
+  const stored = persistLayoutFromUrl(urlValue);
+  const layout = resolveLayout({ urlValue, stored, narrowMatch: narrowMQ.matches });
+  document.body?.setAttribute('data-dsh-pocket-layout', layout);
+  if (layout === 'desktop') return;
+  // 强制 mobile：narrow 永远 true；宽度变化不再切换（用户已显式选 mobile）
+  // auto 模式：narrow 是真实的 matchMedia，宽度变化会触发 effect 挂载/卸载
+  let narrow: MediaQueryList = narrowMQ;
+  if (layout === 'mobile') {
+    narrow = { matches: true, addEventListener: () => {}, removeEventListener: () => {} } as MediaQueryList;
+  }
+
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-mobile-nav: dictionaries')
 
   ctx.effect(() => {
@@ -52,7 +71,6 @@ export function mobileApply(ctx): void {
   //   zoom; modern browsers are covered by the stylesheet's
   //   touch-action: manipulation (which keeps pan and pinch zoom).
   ctx.effect(() => {
-    const narrow = window.matchMedia('(max-width: 1023px)')
     const viewport = document.querySelector<HTMLMetaElement>('meta[name="viewport"]')
     const originalViewport = viewport?.content ?? ''
     const themeMeta = document.createElement('meta')
@@ -96,7 +114,6 @@ export function mobileApply(ctx): void {
   // sheet's own collapse chevron is tapped, so closing is symmetric with
   // opening.
   ctx.effect(() => {
-    const narrow = window.matchMedia('(max-width: 1023px)')
     if (!narrow.matches) return () => {}
     const onChevronClick = (event: MouseEvent) => {
       const target = event.target as HTMLElement | null
@@ -115,7 +132,6 @@ export function mobileApply(ctx): void {
   // `data-mobile-nav-explorer="1|0"` so the stylesheet can hide the entries
   // on hosts without it (dsh-web-ui installs keep the feature).
   ctx.effect(() => {
-    const narrow = window.matchMedia('(max-width: 1023px)')
     if (!narrow.matches) return () => {}
     const frame = (): HTMLElement | null => document.querySelector('[data-mobile-nav="frame"]')
     const check = () => {
@@ -141,7 +157,6 @@ export function mobileApply(ctx): void {
   // whenever the suite hides the column again (collapse chevron / tab
   // close), so a restored-but-unwanted sheet never appears.
   ctx.effect(() => {
-    const narrow = window.matchMedia('(max-width: 1023px)')
     if (!narrow.matches) return () => {}
     const frame = (): HTMLElement | null => document.querySelector('[data-mobile-nav="frame"]')
     const onTap = (event: MouseEvent) => {
@@ -167,13 +182,11 @@ export function mobileApply(ctx): void {
 
   // The official conversation status row (turns / steps / LLM time / TTFT /
   // cache) has a hashed class, so the stylesheet cannot target it directly.
-  // Mark the exact row on narrow screens by text: a [class$=_root] that
-  // carries the metrics text and no textarea (the composer card also ends in
-  // _root and can mention turns in its model line). The CSS then lays the
-  // marked row out as ONE horizontally scrolling line with every metric
-  // reachable.
+  // Its stable boundary is the official conversation.composer.dock slot. Mark
+  // only the metrics root inside that slot; never scan every *_root under the
+  // composer because the editor itself is now contenteditable (not textarea)
+  // and its root also contains the dock text.
   ctx.effect(() => {
-    const narrow = window.matchMedia('(max-width: 1023px)')
     if (!narrow.matches) return () => {}
     // The composer root renders the TPS readout ("TPS 89.4 tok/s") as its
     // own row BELOW the status strip; fold it into the strip so every
@@ -192,13 +205,10 @@ export function mobileApply(ctx): void {
       }
     }
     const mark = (): void => {
-      for (const root of document.querySelectorAll('[data-phase] [class$="_root"]')) {
-        // The status row lives inside the composer stack; message-area
-        // blocks can also mention turns/steps and must be skipped.
-        if (root.closest('[class$="_composerStack"]') === null) continue
+      const selector = '[data-phase] [data-slot="conversation.composer.dock"] [class$="_root"]'
+      for (const root of document.querySelectorAll(selector)) {
         const text = root.textContent ?? ''
         if (!/(turns|steps|\bLLM\b|轮|步)/.test(text)) continue
-        if (root.querySelector('textarea') !== null) continue
         root.setAttribute('data-mobile-nav', 'stats')
         moveTps(root)
         return
@@ -218,7 +228,6 @@ export function mobileApply(ctx): void {
   // with the Web Animations API each time a column turns visible, then
   // leave the resting state to the stylesheet.
   ctx.effect(() => {
-    const narrow = window.matchMedia('(max-width: 1023px)')
     if (!narrow.matches) return () => {}
     const cols = ['[data-aionui-explorer-col]', '[data-aionui-preview-col]']
     const seen = new Map<string, boolean>()
@@ -250,6 +259,46 @@ export function mobileApply(ctx): void {
       observer.disconnect()
     }
   }, 'dsh-mobile-nav: sheet rise animation replay')
+
+  // 移动端文件守卫（issue #17 修正）：手机上点 dsh-web 渲染的文件链接会触发桌面
+  // 端 workspaces.openPath(open ...) —— 既打不开（路径在电脑上），又会抛
+  // "path open failed"。这里在捕获阶段拦截这类点击 / 键盘激活，改为弹一个提示，
+  // 并隐藏「添加工作区」入口（手机上配工作区无意义）；同时在文件链接旁注入
+  // 「复制」按钮，点它经主机 RPC 读取文件正文再写入剪贴板。只挂窄屏。
+  ctx.effect(() => {
+    if (!narrow.matches) return () => {}
+    // 尽量拿到当前工作区 cwd（文件链接文案是相对它的），传给主机 RPC 做精确解析；
+    // 拿不到就回退到主机 process.cwd()。dsh-web 的 workspaces 服务暴露当前工作区。
+    const getWorkspaceCwd = (): string => {
+      try {
+        const ws = (ctx as unknown as { get?: (k: string) => unknown }).get?.('workspaces')
+          ?? (ctx as unknown as { workspaces?: unknown }).workspaces
+        const list = (ws as { list?: unknown })?.list
+        const arr: unknown[] | null = Array.isArray(list)
+          ? list
+          : (list && typeof list === 'object' && 'value' in (list as object)
+            ? (list as { value: unknown[] }).value
+            : null)
+        if (Array.isArray(arr)) {
+          for (const w of arr) {
+            const c = (w as { cwd?: string; root?: string })?.cwd
+              ?? (w as { cwd?: string; root?: string })?.root
+            if (typeof c === 'string' && c) return c
+          }
+        }
+      } catch { /* 忽略，回退 process.cwd() */ }
+      return ''
+    }
+    // 手机侧读文件回调：走 dsh-pocket 的 RPC 通道，由主机侧 fileRead 端点处理。
+    const readFile = (filePath: string) =>
+      ctx.connection.rpc.call(
+        POCKET_RPC_CHANNEL,
+        POCKET_ENDPOINTS.fileRead,
+        { path: filePath, cwd: getWorkspaceCwd() },
+      ) as Promise<{ ok: boolean; value?: { content: string; path: string; size: number }; error?: { message: string } }>
+    return startFileGuard(readFile)
+  }, 'dsh-mobile-nav: file open guard + copy button + hide add-workspace (issue #17)')
+
 
   ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({
     name: 'conversation.session.header.actions',

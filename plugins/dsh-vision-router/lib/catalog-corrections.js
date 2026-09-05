@@ -14,6 +14,8 @@ import {
   readResponseJsonBounded,
   readResponseTextBounded,
 } from './http-body-limit.js'
+import { stripTrailingSlashes } from './string-normalization.js'
+import { currentVisionProviderTransport } from './vision-provider-transport.js'
 
 export const CATALOG_ROUTING_CORRECTIONS = [
   {
@@ -250,10 +252,14 @@ export async function callAnthropicCompatible(provider, messages, options = {}) 
     ...(typeof options.top_p === 'number' ? { top_p: options.top_p } : {}),
   }
   const system = options.system && String(options.system).trim() !== '' ? options.system : undefined
-  const url = `${String(provider.baseURL).replace(/\/+$/, '')}/v1/messages`
+  const url = `${stripTrailingSlashes(provider.baseURL)}/v1/messages`
   let response
   try {
-    response = await fetch(url, {
+    const transport = currentVisionProviderTransport()
+    const requestFetch = transport
+      ? (input, init) => transport.fetch(input, init, { providerName: provider.name, allowProxy: true })
+      : fetch
+    response = await requestFetch(url, {
       method: 'POST',
       headers,
       body: JSON.stringify(system === undefined ? body : { ...body, system }),

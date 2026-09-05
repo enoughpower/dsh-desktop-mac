@@ -1,6 +1,6 @@
 # Desktop-app overlay: dsh-vision-router — eyes for text-only DeepSeek agents.
 #
-# `dsh-vision-router` (ysr666, v1.7.6) keeps the original pixels on the vision
+# `dsh-vision-router` (ysr666, v2.1.2) keeps the original pixels on the vision
 # model side and DeepSeek as the brain: a built-in free vision chain (OVHcloud
 # anonymous, key-less) + 14 pixel-level vision tools (ground / crop / pixel-diff
 # / colors / OCR / svg-trace / cutout / html-screenshot …). It does NOT take
@@ -13,11 +13,17 @@
       config:
         progressiveTools: false
 
-# Attachment product contract: host store accepts 20 MiB / 100 MP originals
-# with a 10000 px single-edge cap (covers 4K originals and long screenshots
-# without loosening the host's global safety gate).
+# Attachment product contract: the host attachment store is the sole owner of
+# the durable image and (0.1.2-alpha.1+) applies an independent normalization
+# stage. Sync both the durable-store admission (20 MiB / 100 MP originals,
+# 10000 px single-edge cap) and the normalized-image budget to DVR's own
+# boundaries so crop / grounding / OCR / pixel-diff always operate on the same
+# canonical pixel coordinate frame, without loosening the host's global gate.
 - id: attachment-local
   config:
     maxImageBytes: 20971520
     maxImagePixels: 100000000
     maxImageDimension: 10000
+    normalizedImageMaxBytes: 20971520
+    normalizedImageMaxPixels: 100000000
+    normalizedImageMaxDimension: 10000

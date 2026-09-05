@@ -2,6 +2,12 @@ import { useEffect, useLayoutEffect, useState } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { IconPanelLeftOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { NS } from './locales.ts'
+import {
+  DRAWER_SELECTOR,
+  TOGGLE_SELECTOR,
+  isOverlayTap,
+  navTargetFor,
+} from './nav-targets.mjs'
 
 /** Full props for the shell overlay entry. */
 export interface MobileNavOverlayProps extends PropsRuntime<'shell.overlay'>, PropsLocale<typeof NS> {
@@ -96,41 +102,139 @@ export function MobileNavOverlay({ toggleSidebar, t }: MobileNavOverlayProps) {
 
   // Navigation inside the drawer closes it: tapping a session row or a
   // plugin takeover entry (task board / ssh) must hand the screen to the
-  // content it just opened. Capture phase — the drawer closes before the
-  // shell or a plugin processes the click, so takeover panels never render
-  // under the open drawer.
+  // content it just opened. Mouse clicks keep the direct close path. Touch
+  // session rows close only after aria-selected changes, so live session
+  // updates cannot strand a delayed click on a detached DOM target.
   //
   // Deliberately NOT closed by this rule:
   // - Settings / Session log: their dialogs render INSIDE the drawer DOM
   //   (portaled into the sidebar); closing the drawer would slide the dialog
   //   off-screen with it.
-  // - Workspace folder chevrons, the logo: pure UI toggles, not navigation.
+  // - Workspace folder rows (YDXeBa_projectRow), the logo: pure UI toggles,
+  //   not navigation — see NAV_TARGETS in nav-targets.mjs.
   // - Anything while a modal dialog is open: the dialog owns the screen.
   useEffect(() => {
     if (!mobile || !open) return
-    const onDrawerClick = (event: MouseEvent) => {
-      if (document.querySelector('[aria-modal="true"]') !== null) return
-      const target = event.target as HTMLElement | null
-      if (target === null) return
-      const drawer = document.querySelector<HTMLElement>('[data-mobile-nav="frame"] > :first-child')
-      if (drawer === null || !drawer.contains(target)) return
-      // A session row's own action buttons — the "Session actions" kebab
-      // (delete / rename), revealed on hover / long-press — open an edit
-      // menu. Tapping one must NOT count as tapping the row, or the drawer
-      // would close and take the just-opened menu with it.
-      if (target.closest('[class*="sessionRow"] button') !== null) return
-      // The drawer footer "Files" action opens the dsh-web-ui explorer sheet,
-      // which sits at a LOWER z-index (55) than the open drawer (600) and
-      // outside the drawer DOM — leaving the drawer open would let it cover
-      // the sheet, and tapping a sheet row would be eaten by the tap-outside
-      // close handler. Close the drawer on Files, like navigation.
-      const navigates = target.closest(
-        'button[data-dsh-taskboard-entry], button[data-dsh-ssh-entry], [class*="newSession"], [class*="sessionRow"], [class*="searchResultRow"], [class*="searchResultWorkspace"], [data-mobile-nav="files"]',
-      )
-      if (navigates !== null) toggleSidebar()
+    let lastTouchNavAt = 0
+    let lastTouchX = 0
+    let lastTouchY = 0
+    let suppressTouchClickUntil = 0
+    let pendingTouchRow: Element | null = null
+    let selectedRowAtArm: Element | null = null
+    let navClickArrived = false
+    let navObserver: MutationObserver | null = null
+    let navTimer: number | null = null
+
+    const drawerRoot = (): HTMLElement | null =>
+      document.querySelector<HTMLElement>(DRAWER_SELECTOR)
+
+    const disarmNav = (): void => {
+      navObserver?.disconnect()
+      navObserver = null
+      if (navTimer !== null) window.clearTimeout(navTimer)
+      navTimer = null
+      pendingTouchRow = null
+      selectedRowAtArm = null
+      navClickArrived = false
     }
+
+    const armNav = (row: Element): void => {
+      disarmNav()
+      pendingTouchRow = row
+      const drawer = drawerRoot()
+      selectedRowAtArm = drawer?.querySelector('[role="treeitem"][aria-selected="true"]') ?? null
+      if (drawer === null) return
+      navObserver = new MutationObserver(() => {
+        const frame = document.querySelector('[data-mobile-nav="frame"]')
+        if (frame === null || frame.hasAttribute('data-sidebar-collapsed')) {
+          disarmNav()
+          return
+        }
+        const selectedRow = drawerRoot()?.querySelector('[role="treeitem"][aria-selected="true"]') ?? null
+        if (navClickArrived && selectedRow !== null && selectedRow !== selectedRowAtArm) {
+          disarmNav()
+          toggleSidebar()
+        }
+      })
+      navObserver.observe(drawer, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['aria-selected'],
+      })
+      navTimer = window.setTimeout(disarmNav, 2000)
+    }
+
+    const navigationTarget = (target: EventTarget | null): Element | null => {
+      if (document.querySelector('[aria-modal="true"]') !== null) return null
+      const frame = document.querySelector('[data-mobile-nav="frame"]')
+      if (frame === null || frame.hasAttribute('data-sidebar-collapsed')) return null
+      if (!(target instanceof Element)) return null
+      const drawer = drawerRoot()
+      if (drawer === null || !drawer.contains(target)) return null
+      return navTargetFor(target)
+    }
+
+    const isPendingTouchClick = (event: MouseEvent): boolean => {
+      const capabilities = (event as MouseEvent & {
+        sourceCapabilities?: { firesTouchEvents?: boolean }
+      }).sourceCapabilities
+      if (capabilities?.firesTouchEvents === true) return true
+      return Math.hypot(event.clientX - lastTouchX, event.clientY - lastTouchY) <= 24
+    }
+
+    const onDrawerClick = (event: MouseEvent): void => {
+      // A touch row tap owns the close through the selection observer. Let the
+      // browser click reach React without a capture-phase close racing it.
+      if (performance.now() < suppressTouchClickUntil) return
+      if (
+        pendingTouchRow !== null
+        && performance.now() - lastTouchNavAt < 500
+        && isPendingTouchClick(event)
+      ) {
+        const target = navigationTarget(event.target)
+        const row = target?.closest('[role="treeitem"]')
+        if (row !== null && row !== undefined) {
+          pendingTouchRow = row
+          navClickArrived = true
+          return
+        }
+      }
+      if (navigationTarget(event.target) !== null) toggleSidebar()
+    }
+
+    const onDrawerPointerUp = (event: PointerEvent): void => {
+      if (event.pointerType !== 'touch' && event.pointerType !== 'pen') return
+      const target = navigationTarget(event.target)
+      if (target === null) return
+
+      const row = target.closest('[role="treeitem"]')
+      if (row !== null) {
+        if (row.getAttribute('aria-selected') === 'true') {
+          // Already-selected rows will not navigate; closing now is safe.
+          suppressTouchClickUntil = performance.now() + 500
+          toggleSidebar()
+        } else {
+          // Let React navigate first, then close on the selection mutation.
+          lastTouchNavAt = performance.now()
+          lastTouchX = event.clientX
+          lastTouchY = event.clientY
+          armNav(row)
+        }
+        return
+      }
+
+      // Non-row targets keep their existing click path; only host
+      // session/search rows participate in the selected-state hand-off.
+    }
+
     document.addEventListener('click', onDrawerClick, true)
-    return () => document.removeEventListener('click', onDrawerClick, true)
+    document.addEventListener('pointerup', onDrawerPointerUp, true)
+    return () => {
+      disarmNav()
+      document.removeEventListener('click', onDrawerClick, true)
+      document.removeEventListener('pointerup', onDrawerPointerUp, true)
+    }
   }, [mobile, open, toggleSidebar])
 
   // Tap-outside closes the drawer (issue #38). The backdrop is now
@@ -146,8 +250,17 @@ export function MobileNavOverlay({ toggleSidebar, t }: MobileNavOverlayProps) {
       if (document.querySelector('[aria-modal="true"]') !== null) return
       const target = event.target as HTMLElement | null
       if (target === null) return
-      if (target.closest('[data-mobile-nav="toggle"]') !== null) return
-      const drawer = document.querySelector<HTMLElement>('[data-mobile-nav="frame"] > :first-child')
+      if (target.closest(TOGGLE_SELECTOR) !== null) return
+      // Portaled overlays (issue #72): the workspace section's "视图选项" /
+      // "添加工作区" and the session row kebab all open menus that live on
+      // document.body — outside the drawer DOM. Without this exemption the
+      // first tap on a menu item is eaten: the drawer slides away, the menu
+      // unmounts with the sidebar, and the item's onClick never runs, so
+      // every workspace control reads as "点了没反应" on a phone.
+      if (isOverlayTap(target)) return
+      const frame = document.querySelector('[data-mobile-nav="frame"]')
+      if (frame === null || frame.hasAttribute('data-sidebar-collapsed')) return
+      const drawer = document.querySelector<HTMLElement>(DRAWER_SELECTOR)
       if (drawer !== null && drawer.contains(target)) return
       toggleSidebar()
     }

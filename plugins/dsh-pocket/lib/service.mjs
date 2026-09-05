@@ -13,7 +13,7 @@ import { execFile } from 'node:child_process';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { createPocketProxy } from './proxy.mjs';
-import { startQuickTunnel } from './tunnel.mjs';
+import { startQuickTunnel, startNamedTunnel } from './tunnel.mjs';
 import { isValidIpv4 } from './ip.mjs';
 
 const require = createRequire(import.meta.url);
@@ -24,8 +24,9 @@ export async function qrDataUrl(text, { width = 220, margin = 1 } = {}) {
   return QRCode.toDataURL(text, { errorCorrectionLevel: 'M', margin, width, type: 'image/png' });
 }
 
-/** RFC1918 私网地址：手机与电脑连同一局域网时通常可直连。 */
-const PRIVATE_IPV4_RE = /^(?:10\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.)/;
+// RFC1918 私网地址：手机与电脑连同一局域网时通常可直连。
+// 另含 CGNAT 100.64/10（RFC 6598，Tailscale/ZeroTier 默认网段，公网不可路由），保持一致（issue #79）。
+const PRIVATE_IPV4_RE = /^(?:10\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.|100\.(?:6[4-9]|[7-9]\d|1(?:0\d|1\d|2[0-7]))\.)/;
 
 /** 名称像真实物理网卡的接口（WLAN / Wi-Fi / Ethernet / 以太网 / 有线 / 无线 / en / eth）。 */
 const PHYSICAL_IFACE_RE = /^(?:wlan|wi-?fi|wireless|ethernet|eth\d|en\d|wlp\d|以太网|有线|无线|本地连接)/i;
@@ -180,11 +181,16 @@ export function createPocketService({
   injectHtml,
   /** 访问令牌认证配置（issue #13）：{ getToken, isProtected }，传给代理 */
   auth,
-  /** 隧道就绪回调（lib/index.js 用它轮换公网密码） */
+  /** @type {() => string} dsh web 浏览器会话启动 token（issue #77；老版本返回空字符串） */
+  launchToken = () => '',
+  /** 隧道配置（issue #66）：() => ({ mode:'quick'|'named', token, hostname })；named 用固定域名 */
+  getTunnelConfig,
+  /** 隧道就绪回调（lib/index.js 用它轮换公网密码；参数为 'quick'|'named'） */
   onTunnelReady,
 } = {}) {
   const createProxy = internals.createProxy ?? createPocketProxy;
   const startTunnel = internals.startTunnel ?? startQuickTunnel;
+  const startNamed = internals.startNamedTunnel ?? startNamedTunnel;
   const getLanOverride = () => {
     const value = String(getLanIpOverride?.() ?? '').trim();
     return isValidIpv4(value) ? value : '';
@@ -254,6 +260,8 @@ export function createPocketService({
             ...(auth ? { auth } : {}),
             // 每次请求实时读开关：设置页切换后立即生效，无需重启代理
             lanAccessEnabled: () => getLanEnabled(),
+            // dsh web 浏览器会话启动 token（issue #77）：实时取，新版 dsh 才有
+            ...(launchToken ? { launchToken } : {}),
           });
           if (p !== port) {
             console.log(`dsh-pocket: port ${port} busy, proxy on ${p} | 端口 ${port} 被占用，代理改用 ${p}`);
@@ -285,20 +293,33 @@ export function createPocketService({
       };
       tunnelPromise = (async () => {
         try {
-          const result = await startTunnel({ port: proxy.port, home, signal: controller.signal, onPhase });
-          // 归一化：startTunnel 契约返回 {url, kill}（字符串也兼容）
-          tunnel = typeof result === 'string' ? { url: result, kill: () => {} } : result;
+          // 命名隧道（issue #66）：固定域名模式——URL 由设置里的域名拼出（cloudflared 不打印）
+          const cfg = typeof getTunnelConfig === 'function' ? (getTunnelConfig() ?? {}) : {};
+          if (cfg?.mode === 'named') {
+            if (!cfg.token || !cfg.hostname) {
+              throw new Error(
+                '命名隧道未配置完整：需要 Tunnel Token 和固定域名（设置页「固定域名」里填写） | '
+                + 'named tunnel is incomplete — set the Tunnel Token and the fixed hostname in Settings',
+              );
+            }
+            const result = await startNamed({ token: cfg.token, home, signal: controller.signal, onPhase });
+            tunnel = { url: `https://${cfg.hostname}`, kill: result.kill, onExit: result.onExit };
+          } else {
+            const result = await startTunnel({ port: proxy.port, home, signal: controller.signal, onPhase });
+            // 归一化：startTunnel 契约返回 {url, kill}（字符串也兼容）
+            tunnel = typeof result === 'string' ? { url: result, kill: () => {} } : result;
+          }
           tunnelState.phase = 'ready';
           // M1：隧道进程运行中死亡（崩溃/被杀）→ 状态打回，别让 UI 永远显示"可用"
           tunnel.onExit?.((code) => {
             if (controller.signal.aborted) return; // 主动停止（stopTunnel）不算故障
             tunnelState.phase = 'error';
-            tunnelState.detail = `隧道进程退出（code=${code}）| tunnel process exited`;
+            tunnelState.detail = `隧道进程退出（code=${code}） | tunnel process exited (code=${code})`;
           });
           // 记录「隧道开启中」，供重启后自动恢复（issue #11）
           void persistAutoTunnel();
-          // 公网隧道就绪 → 轮换访问密码（issue #13：每次开启变新，旧链接作废）
-          try { onTunnelReady?.(); } catch { /* 忽略 */ }
+          // 公网隧道就绪 → 回调（快速模式轮换访问密码；命名模式不轮换，见 lib/index.js）
+          try { onTunnelReady?.(cfg?.mode === 'named' ? 'named' : 'quick'); } catch { /* 忽略 */ }
           return tunnel.url;
         } catch (err) {
           // stopTunnel 触发的 abort 不算错误：保持 idle，别把状态刷成 error
@@ -368,6 +389,15 @@ export function createPocketService({
         tunnelUrl: tunnel?.url ?? null,
         tunnelQr: await qrCached(tunnel?.url ?? null),
         tunnelState: { ...tunnelState },
+        // 隧道配置脱敏视图（issue #66）：token 永不回显，只有 tokenSet 布尔值
+        tunnelConfig: (() => {
+          const cfg = typeof getTunnelConfig === 'function' ? (getTunnelConfig() ?? {}) : {};
+          return {
+            mode: cfg?.mode === 'named' ? 'named' : 'quick',
+            hostname: typeof cfg?.hostname === 'string' ? cfg.hostname : '',
+            tokenSet: Boolean(cfg?.token),
+          };
+        })(),
         dshPort,
       };
     },

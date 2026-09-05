@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { AsyncLocalStorage } from 'node:async_hooks'
+import { retainArtifactRun } from './artifact-retention.js'
 import {
   currentVisionTurnBudget,
   runWithVisionTurnBudget,
@@ -11,6 +12,8 @@ import {
   ProxyDispatcherTracker,
   proxyRequestIsManaged,
 } from './runtime-reliability.js'
+import { projectDelegatedCallConfig } from './delegated-call-config.js'
+import { VISION_RESULT_CODES } from './vision-resilience.js'
 
 const toolRuntime = new AsyncLocalStorage()
 const wrappedContexts = new WeakMap()
@@ -20,6 +23,24 @@ const wrappedSettings = new WeakMap()
 const wrappedScopes = new WeakMap()
 const wrappedLlms = new WeakMap()
 const wrappedAdapters = new WeakMap()
+const wrappedDelegatingAdapters = new WeakMap()
+const wrappedTransparentAdapters = new WeakMap()
+const VISION_ROUTER_ADAPTER_OWNER = Symbol.for('dsh-vision-router.adapter-owner')
+const MAX_TRANSPARENT_REASONING_MEMORY = 512
+const VISION_FAILURE_RESULT_CODES = new Set(Object.values(VISION_RESULT_CODES))
+
+function cacheableVisionDescribeResult(value) {
+  let parsed = value
+  if (typeof value === 'string') {
+    try {
+      parsed = JSON.parse(value)
+    } catch {
+      return true
+    }
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return true
+  return !(parsed.ok === false && VISION_FAILURE_RESULT_CODES.has(parsed.code))
+}
 
 function usableSignal(value) {
   return value && typeof value === 'object' && typeof value.aborted === 'boolean' ? value : undefined
@@ -36,6 +57,12 @@ function toolAbortError() {
   const error = new Error('vision tool execution aborted')
   error.name = 'AbortError'
   error.code = 'ABORT_ERR'
+  return error
+}
+
+function toolDisabledError(name) {
+  const error = new Error(`${name}: vision tools are disabled in the Vision Router settings`)
+  error.code = 'VISION_TOOLS_DISABLED'
   return error
 }
 
@@ -75,10 +102,11 @@ function stableRuntimeConfigSignature(value) {
   }
 }
 
-function createRuntimeState() {
+function createRuntimeState(initialConfig = {}) {
   const cache = new LiveDescribeCache()
   const endpoints = new HttpEndpointRevisionTracker()
   const proxyDispatchers = new ProxyDispatcherTracker()
+  const transparentReasoning = new Map()
   let config = {
     cache: true,
     cacheMaxEntries: 200,
@@ -86,6 +114,9 @@ function createRuntimeState() {
     httpProviders: [],
     proxy: '',
     proxyHosts: [],
+    ...(initialConfig && typeof initialConfig === 'object' && !Array.isArray(initialConfig)
+      ? initialConfig
+      : {}),
   }
   let signature = stableRuntimeConfigSignature(config)
   let revision = 0
@@ -103,10 +134,25 @@ function createRuntimeState() {
       maxEntries: Number(value.cacheMaxEntries),
       ttlMs: Number(value.cacheTtlSeconds) * 1000,
     })
-    // Prime endpoint generations during the settings watch itself. This makes
-    // the old->new route alias available before the first post-edit call.
     endpoints.project(value.httpProviders)
     return config
+  }
+
+  const rememberTransparentReasoning = (key, value) => {
+    if (transparentReasoning.size >= MAX_TRANSPARENT_REASONING_MEMORY && !transparentReasoning.has(key)) {
+      const oldest = transparentReasoning.keys().next().value
+      if (oldest !== undefined) transparentReasoning.delete(oldest)
+    }
+    transparentReasoning.delete(key)
+    transparentReasoning.set(key, value)
+  }
+
+  const recallTransparentReasoning = (key) => {
+    if (!transparentReasoning.has(key)) return undefined
+    const value = transparentReasoning.get(key)
+    transparentReasoning.delete(key)
+    transparentReasoning.set(key, value)
+    return value
   }
 
   return {
@@ -116,6 +162,8 @@ function createRuntimeState() {
     noteConfig,
     config: () => config,
     revision: () => revision,
+    rememberTransparentReasoning,
+    recallTransparentReasoning,
   }
 }
 
@@ -126,6 +174,10 @@ function stateFor(name, exec) {
     signal: usableSignal(exec?.signal),
     artifactRunId: `.vision-run-${Date.now().toString(36)}-${randomUUID()}`,
     disableCoreCache: name === 'vision_describe',
+    // Every model call made from a Vision Router tool is a real authority
+    // handoff. The selected target adapter, not the tool's generic defaults,
+    // owns reasoning/sampling/output-limit call config.
+    callConfigAuthority: 'target',
   }
 }
 
@@ -301,6 +353,159 @@ function wrapVisionHttpAdapter(adapter, runtimeState) {
   return wrapped
 }
 
+function visionChainAdapter(adapter, routes) {
+  if (!adapter || (typeof adapter !== 'object' && typeof adapter !== 'function')) return false
+  if (typeof adapter.providerInfo !== 'function') return false
+  for (const route of routes) {
+    try {
+      const name = adapter.providerInfo(String(route))?.name
+      if (name === 'Vision Chain') return true
+    } catch {
+      // Provider metadata is advisory; another route may still identify it.
+    }
+  }
+  return false
+}
+
+function visionRouterOwnedAdapter(adapter) {
+  if (!adapter || (typeof adapter !== 'object' && typeof adapter !== 'function')) return false
+  try {
+    return adapter[VISION_ROUTER_ADAPTER_OWNER] !== undefined
+  } catch {
+    return false
+  }
+}
+
+function explicitReasoningEffort(options) {
+  const value = options?.reasoningEffort
+  return typeof value === 'string' && value !== '' ? value : undefined
+}
+
+function sessionIdentity(options) {
+  const value = options?.sessionId
+  return value === undefined || value === null || String(value) === '' ? undefined : String(value)
+}
+
+function transparentReasoningKey(state, options) {
+  const sessionId = state?.transparentSessionId
+  const provider = options?.provider
+  const model = options?.model
+  if (
+    typeof sessionId !== 'string' || sessionId === '' ||
+    typeof provider !== 'string' || provider === '' ||
+    typeof model !== 'string' || model === ''
+  ) return undefined
+  return `${sessionId}\u0000${provider}\u0000${model}`
+}
+
+function projectTransparentCallConfig(options, state, runtimeState) {
+  if (!options || typeof options !== 'object' || Array.isArray(options)) return options
+  const key = transparentReasoningKey(state, options)
+  const explicit = state?.transparentExplicitReasoning
+  if (explicit !== undefined) {
+    if (key !== undefined) runtimeState.rememberTransparentReasoning(key, explicit)
+    return options.reasoningEffort === explicit ? options : { ...options, reasoningEffort: explicit }
+  }
+
+  const remembered = key === undefined ? undefined : runtimeState.recallTransparentReasoning(key)
+  if (remembered !== undefined) {
+    return options.reasoningEffort === remembered ? options : { ...options, reasoningEffort: remembered }
+  }
+
+  // Core 1.7.x still carries a provider/model-only wrapper cache. Without an
+  // exact session proof, discard only that potentially stale injected effort;
+  // all other caller-owned generation config remains transparent.
+  if (!Object.hasOwn(options, 'reasoningEffort')) return options
+  const { reasoningEffort: _reasoningEffort, ...rest } = options
+  return rest
+}
+
+async function* iterateUnderRuntimeState(iterable, state) {
+  const iterator = toolRuntime.run(state, () => iterable[Symbol.asyncIterator]())
+  let completed = false
+  try {
+    while (true) {
+      const item = await toolRuntime.run(state, () => iterator.next())
+      if (item.done) {
+        completed = true
+        return
+      }
+      yield item.value
+    }
+  } finally {
+    if (!completed && typeof iterator.return === 'function') {
+      await toolRuntime.run(state, () => iterator.return())
+    }
+  }
+}
+
+function wrapDelegatingAdapter(adapter, runtimeState) {
+  if (!adapter || (typeof adapter !== 'object' && typeof adapter !== 'function')) return adapter
+  let byRuntime = wrappedDelegatingAdapters.get(adapter)
+  if (!byRuntime) {
+    byRuntime = new WeakMap()
+    wrappedDelegatingAdapters.set(adapter, byRuntime)
+  }
+  const cached = byRuntime.get(runtimeState)
+  if (cached) return cached
+  const wrapped = new Proxy(adapter, {
+    get(target, property) {
+      if (property !== 'stream') {
+        const value = Reflect.get(target, property, target)
+        return typeof value === 'function' ? value.bind(target) : value
+      }
+      const stream = Reflect.get(target, property, target)
+      if (typeof stream !== 'function') return stream
+      return function streamWithDelegatedCallAuthority(options) {
+        const parent = toolRuntime.getStore()
+        const state = {
+          ...(parent && typeof parent === 'object' ? parent : {}),
+          callConfigAuthority: 'target',
+          delegationOwner: 'vision-chain',
+        }
+        const iterable = toolRuntime.run(state, () => stream.call(target, options))
+        return iterateUnderRuntimeState(iterable, state)
+      }
+    },
+  })
+  byRuntime.set(runtimeState, wrapped)
+  return wrapped
+}
+
+function wrapTransparentAdapter(adapter, runtimeState) {
+  if (!adapter || (typeof adapter !== 'object' && typeof adapter !== 'function')) return adapter
+  let byRuntime = wrappedTransparentAdapters.get(adapter)
+  if (!byRuntime) {
+    byRuntime = new WeakMap()
+    wrappedTransparentAdapters.set(adapter, byRuntime)
+  }
+  const cached = byRuntime.get(runtimeState)
+  if (cached) return cached
+  const wrapped = new Proxy(adapter, {
+    get(target, property) {
+      if (property !== 'stream') {
+        const value = Reflect.get(target, property, target)
+        return typeof value === 'function' ? value.bind(target) : value
+      }
+      const stream = Reflect.get(target, property, target)
+      if (typeof stream !== 'function') return stream
+      return function streamWithTransparentCallAuthority(options) {
+        const parent = toolRuntime.getStore()
+        const state = {
+          ...(parent && typeof parent === 'object' ? parent : {}),
+          callConfigAuthority: 'transparent',
+          transparentExplicitReasoning: explicitReasoningEffort(options),
+          transparentSessionId: sessionIdentity(options),
+        }
+        const iterable = toolRuntime.run(state, () => stream.call(target, options))
+        return iterateUnderRuntimeState(iterable, state)
+      }
+    },
+  })
+  byRuntime.set(runtimeState, wrapped)
+  return wrapped
+}
+
 function wrapLlm(llm, runtimeState) {
   if (!llm || (typeof llm !== 'object' && typeof llm !== 'function')) return llm
   let byRuntime = wrappedLlms.get(llm)
@@ -312,14 +517,31 @@ function wrapLlm(llm, runtimeState) {
   if (cached) return cached
   const wrapped = new Proxy(llm, {
     get(target, property) {
+      if (property === 'stream') {
+        const stream = Reflect.get(target, property, target)
+        if (typeof stream !== 'function') return stream
+        return (options) => {
+          const state = toolRuntime.getStore()
+          const projected = state?.callConfigAuthority === 'target'
+            ? projectDelegatedCallConfig(options)
+            : state?.callConfigAuthority === 'transparent'
+              ? projectTransparentCallConfig(options, state, runtimeState)
+              : options
+          return stream.call(target, projected)
+        }
+      }
       if (property === 'registerAdapter') {
         const register = Reflect.get(target, property, target)
         if (typeof register !== 'function') return register
         return (routes, adapter, ...rest) => {
           const list = Array.isArray(routes) ? routes : [routes]
-          const nextAdapter = list.some((route) => String(route) === 'vision-http')
-            ? wrapVisionHttpAdapter(adapter, runtimeState)
-            : adapter
+          const visionHttp = list.some((route) => String(route) === 'vision-http')
+          let nextAdapter = visionHttp ? wrapVisionHttpAdapter(adapter, runtimeState) : adapter
+          if (visionChainAdapter(nextAdapter, list)) {
+            nextAdapter = wrapDelegatingAdapter(nextAdapter, runtimeState)
+          } else if (!visionHttp && visionRouterOwnedAdapter(nextAdapter)) {
+            nextAdapter = wrapTransparentAdapter(nextAdapter, runtimeState)
+          }
           return register.call(target, routes, nextAdapter, ...rest)
         }
       }
@@ -332,30 +554,86 @@ function wrapLlm(llm, runtimeState) {
 }
 
 async function executeVisionTool(def, args, exec, execute, wrappedCtx, runtimeState) {
+  const liveConfig = runtimeState.config()
+  if (liveConfig?.tool === false) throw toolDisabledError(def.name)
+
   const state = stateFor(def.name, exec)
-  return toolRuntime.run(state, () => withMergedTurnSignal(state, () =>
-    executeAbortable(state.signal, async () => {
-      if (def.name !== 'vision_describe') return execute(args, exec)
-      const liveConfig = runtimeState.config()
-      let cacheKey
-      if (liveConfig.cache !== false) {
-        try {
-          cacheKey = await describeCacheKey(wrappedCtx, args, exec, runtimeState.revision())
-          if (cacheKey) {
-            const hit = runtimeState.cache.get(cacheKey)
-            if (hit !== undefined) return hit
+  const releaseArtifactRun = retainArtifactRun(state.artifactRunId)
+  try {
+    return await toolRuntime.run(state, () => withMergedTurnSignal(state, () =>
+      executeAbortable(state.signal, async () => {
+        if (def.name !== 'vision_describe') return execute(args, exec)
+        const currentConfig = runtimeState.config()
+        let cacheKey
+        if (currentConfig.cache !== false) {
+          try {
+            cacheKey = await describeCacheKey(wrappedCtx, args, exec, runtimeState.revision())
+            if (cacheKey) {
+              const hit = runtimeState.cache.get(cacheKey)
+              if (hit !== undefined) return hit
+            }
+          } catch {
+            cacheKey = undefined
           }
-        } catch {
-          cacheKey = undefined
         }
-      }
-      const result = await execute(args, exec)
-      if (cacheKey && runtimeState.config().cache !== false && !state.signal?.aborted) {
-        runtimeState.cache.set(cacheKey, result)
-      }
-      return result
-    }),
-  ))
+        const result = await execute(args, exec)
+        if (
+          cacheKey &&
+          runtimeState.config().cache !== false &&
+          !state.signal?.aborted &&
+          cacheableVisionDescribeResult(result)
+        ) {
+          runtimeState.cache.set(cacheKey, result)
+        }
+        return result
+      }),
+    ))
+  } finally {
+    releaseArtifactRun()
+  }
+}
+
+/**
+ * DSH's durable attachment contract adds originalDimensions when host-side
+ * normalization downsizes an image. Core 1.7.x returns that attachment
+ * envelope from vision_present while declaring a strict schema, so older
+ * declarations reject the host's legitimate field before render (#287).
+ * Patch only that one tool definition and keep every strict boundary intact.
+ */
+export function normalizeVisionPresentOutputSchema(def) {
+  if (!def || def.name !== 'vision_present') return def
+  const schema = def.output?.schema
+  const attachment = schema?.properties?.attachment
+  const properties = attachment?.properties
+  if (!properties || properties.originalDimensions !== undefined) return def
+
+  return {
+    ...def,
+    output: {
+      ...def.output,
+      schema: {
+        ...schema,
+        properties: {
+          ...schema.properties,
+          attachment: {
+            ...attachment,
+            properties: {
+              ...properties,
+              originalDimensions: {
+                type: 'object',
+                properties: {
+                  width: { type: 'integer' },
+                  height: { type: 'integer' },
+                },
+                required: ['width', 'height'],
+                additionalProperties: false,
+              },
+            },
+          },
+        },
+      },
+    },
+  }
 }
 
 function wrapTools(tools, wrappedCtx, runtimeState) {
@@ -369,14 +647,15 @@ function wrapTools(tools, wrappedCtx, runtimeState) {
       const register = Reflect.get(target, property, target)
       if (typeof register !== 'function') return register
       return (def) => {
-        if (!def || typeof def.name !== 'string' || !def.name.startsWith('vision_') || typeof def.execute !== 'function') {
-          return register.call(target, def)
+        const normalizedDef = normalizeVisionPresentOutputSchema(def)
+        if (!normalizedDef || typeof normalizedDef.name !== 'string' || !normalizedDef.name.startsWith('vision_') || typeof normalizedDef.execute !== 'function') {
+          return register.call(target, normalizedDef)
         }
-        const execute = def.execute
+        const execute = normalizedDef.execute
         return register.call(target, {
-          ...def,
+          ...normalizedDef,
           execute(args, exec) {
-            return executeVisionTool(def, args, exec, execute, wrappedCtx, runtimeState)
+            return executeVisionTool(normalizedDef, args, exec, execute, wrappedCtx, runtimeState)
           },
         })
       }
@@ -404,12 +683,12 @@ function installProxyDispatcherLifecycle(ctx, runtimeState) {
   }, 'vision-router: proxy dispatcher lifecycle')
 }
 
-export function installVisionToolRuntimeBoundary(ctx) {
+export function installVisionToolRuntimeBoundary(ctx, initialConfig = {}) {
   if (!ctx || (typeof ctx !== 'object' && typeof ctx !== 'function')) return ctx
   const cached = wrappedContexts.get(ctx)
   if (cached) return cached
 
-  const runtimeState = createRuntimeState()
+  const runtimeState = createRuntimeState(initialConfig)
   let wrapped
   wrapped = new Proxy(ctx, {
     get(target, property) {

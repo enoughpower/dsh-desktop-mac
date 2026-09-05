@@ -210,14 +210,19 @@ export const MOBILE_CSS = `
      it to 500), and when the layer outranks the drawer, the backdrop paints
      ABOVE the drawer and swallows every tap — the drawer opens but no row
      can be pressed (every tap just closes it). The drawer must therefore
-     outrank any such raise: 600 clears the known 500 while staying under the
-     fixed-position banners/toasts (z 9999) that float at the viewport level. */
+     outrank any such raise.
+     1200 (was 600) clears the mobile layers shipped by
+     @linxin666/dsh-web-ui-all — its sidebar pane is z-index 1100, its
+     details pane 1000 and its full-screen frame ::after mask 1050 (issue
+     #67: that mask sat on top of the 600 drawer and ate every tap). Still
+     far under the fixed-position banners/toasts (z 9999) that float at the
+     viewport level. */
   [data-mobile-nav="frame"] > :first-child {
     position: absolute !important;
     inset: 0 auto 0 0 !important;
     width: max-content !important;
     max-width: 92vw !important;
-    z-index: 600 !important;
+    z-index: 1200 !important;
     transform: translateX(-110%);
     transition: transform .28s var(--ds-ease-in-out, ease-in-out);
     background: var(--dsw-alias-bg-base, #ffffff);
@@ -244,6 +249,32 @@ export const MOBILE_CSS = `
      viewport-anchored: it dims the full screen and the sheet sits at left:8. */
   [data-mobile-nav="frame"]:not([data-sidebar-collapsed]) > :first-child {
     transform: none !important;
+  }
+
+  /* Kill a competing full-screen mask (issue #67).
+     @linxin666/dsh-web-ui-all ships its own mobile drawer, and part of it is
+
+       [data-dsh-frame]:not([data-sidebar-collapsed])::after {
+         content: ""; position: fixed; inset: 0; z-index: 1050;
+         background: rgb(0 0 0 / 24%);
+       }
+
+     The pseudo-element belongs to the frame we already mark, and the frame
+     carries only "position: relative" with z-index auto — no stacking context
+     — so this mask competes with the drawer in the parent stacking context
+     and, at 1050, paints over it. It covers the whole viewport, so every tap
+     on a session row lands on the mask instead: the drawer opens but nothing
+     inside it can be pressed, and the page behind cannot be scrolled.
+     Removing it is safe: the mobile stylesheet already renders its own
+     backdrop, and tapping outside the drawer is handled in JS.
+
+     The attribute selector is repeated on purpose. Their rule has the same
+     specificity (0,2,1) once ours is written the obvious way, and plugin
+     stylesheets are injected in load order, so a tie would be decided by
+     whichever plugin happened to load last. Doubling the attribute makes it
+     (0,3,1) and deterministic. */
+  [data-mobile-nav="frame"][data-mobile-nav="frame"]:not([data-sidebar-collapsed])::after {
+    content: none !important;
   }
 
   /* Drag handles are useless on touch and would float over the drawer. */
@@ -302,26 +333,77 @@ export const MOBILE_CSS = `
     font-size: 15px !important;
   }
 
+  /* Keep DSH's own process disclosures and their expand/collapse behaviour,
+     but remove desktop-sized vertical breathing room between consecutive
+     context, Skill, and system-prompt entries. */
+  [data-phase] [data-turn-process] {
+    height: 28px !important;
+    padding-bottom: 4px !important;
+    margin-bottom: 4px !important;
+  }
+  [data-phase] [data-turn-process][data-open] {
+    margin-bottom: 4px !important;
+  }
+  [data-phase] [data-disclosure-row] {
+    min-height: 24px !important;
+  }
+  [data-phase] :is([data-context-injection-body], [data-system-prompt-body]) {
+    margin-top: 2px !important;
+  }
+
   /* --- Composer bottom row on mobile ---
-     The official row gives the model pill (trailing) flex:0 0 auto, which
-     squeezes the agent-permission pill (modes) down to 15px: the pill's
-     chevron then overflows on top of the model name. Let the permission
-     pill keep its natural width and let the model pill shrink instead.
-     Anchored by the composer card (:has(textarea)): row = last child,
-     tools = first child, permission pill = its 2nd child, model pill =
-     row's last child. */
-  [data-phase] [class*="_card"]:has(textarea) > :last-child {
+     Keep add, permission, model, reasoning and send controls on one line at
+     the Honor 50's 360px CSS viewport. DSH's stable data-composer-card hook
+     survives the editor's textarea -> contenteditable migration. */
+  [data-phase] [data-composer-card="true"] > [class$="_row"] {
+    flex-wrap: nowrap !important;
+    gap: 6px !important;
+  }
+  [data-phase] [data-composer-card="true"] > [class$="_row"] > :first-child {
     gap: 8px !important;
-  }
-  [data-phase] [class*="_card"]:has(textarea) > :last-child > :first-child {
-    gap: 8px !important;
-  }
-  [data-phase] [class*="_card"]:has(textarea) > :last-child > :first-child > :nth-child(2) {
-    flex: 0 0 auto !important;
-  }
-  [data-phase] [class*="_card"]:has(textarea) > :last-child > :last-child {
-    flex: 1 1 auto !important;
     min-width: 0 !important;
+  }
+  [data-phase] [data-composer-card="true"] > [class$="_row"] > :first-child > :nth-child(2) {
+    flex: 0 1 auto !important;
+    min-width: 0 !important;
+  }
+  [data-phase] [data-composer-card="true"] > [class$="_row"] > :last-child {
+    flex: 1 1 0 !important;
+    min-width: 0 !important;
+    gap: 6px !important;
+  }
+
+  /* --- Composer popups as bottom sheets on mobile ---
+     Two composer-anchored popups break on phones (field: bottom + side
+     cut, only part of the popup visible):
+     1. the model pill menu ([role=menu], max 360px, opens upward from the
+        pill inside the composer card);
+     2. the "/" command palette (max 320px card with the search box — it
+        hosts the /model popupSelect list: search + provider-grouped rows).
+     Both are position:absolute INSIDE the conversation scrollBody
+     (overflow:hidden) and the shell center column (overflow:hidden), so
+     the scroll containers clip them mid-list. Forensics showed neither
+     layer creates a containing block (no transform/contain/will-change),
+     so on mobile we snap whichever popup is open to a viewport-anchored
+     sheet: fixed positioning escapes the scroll clip entirely, width is
+     deterministic, safe-area keeps it off the gesture bar. A transient
+     picker covering the composer is standard mobile UX; selection or an
+     outside tap still dismisses it. */
+  [data-phase] [class$="_root"]:has(> [aria-haspopup="menu"]) > [role="menu"],
+  [data-phase] [class$="_card"]:has(> [class$="_search"]) {
+    position: fixed !important;
+    left: 12px !important;
+    right: 12px !important;
+    top: auto !important;
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 12px) !important;
+    width: auto !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    max-height: min(65vh, 480px) !important;
+    max-height: min(65dvh, 480px) !important;
+    z-index: 130 !important;
+    border-radius: 14px !important;
+    box-shadow: 0 -4px 28px rgba(0, 0, 0, .18) !important;
   }
 
   /* --- Session header on mobile ---
@@ -332,14 +414,22 @@ export const MOBILE_CSS = `
        header > :first-child                   titleRow (titleCluster + utilities)
        header > :first-child > :last-child     headerUtilities (Session log seat) */
   [data-phase] header {
-    padding-right: 12px !important;
+    padding: 8px 12px 0 !important;
   }
-  /* Give the title row a lane clear of the absolutely-placed toggle, then
-     balance the header: with header padding-right 12px, a 20px left
-     padding puts the title's geometric center exactly on the viewport
-     center (measured 195/195 at 390px). */
+  /* The directory and Files controls are absolutely positioned, so reserve
+     their lanes and let the title use the remaining width without squeezing. */
   [data-phase] header > :first-child {
-    padding-left: 20px !important;
+    min-height: 36px !important;
+    padding: 0 32px !important;
+  }
+  [data-phase] header [class$="_titleCluster"],
+  [data-phase] header [class$="_crumbs"] {
+    min-width: 0 !important;
+  }
+  [data-phase] header button[class*="_crumb"] {
+    max-width: calc(100vw - 104px) !important;
+    padding-left: 0 !important;
+    padding-right: 0 !important;
   }
   /* The directory toggle sits at the far left of the header (the header
      is position:relative; the data-slot wrappers are display:contents). */
@@ -841,6 +931,48 @@ export const MOBILE_CSS = `
   [data-phase="hero"] [class$="_stack"] {
     gap: 0 !important;
   }
+
+  /* ---------- 隐藏「添加工作区」入口（手机上配工作区无意义，issue #17 修正） ----------
+     图标按钮的 aria-label 随语言变化（zh「添加工作区」/ en「Add workspace」），
+     两种都覆盖；下拉菜单里的「添加工作区…」项由 fileGuard.ts 的 MutationObserver
+     按文案兜底隐藏（CSS 选不到纯文本节点）。只在窄屏生效——桌面端照常保留。 */
+  button[aria-label="添加工作区"],
+  button[aria-label="添加工作区…"],
+  button[aria-label="Add workspace"],
+  button[aria-label="Add workspace…"] {
+    display: none !important;
+  }
+
+  /* ---------- 文件链接旁的「复制」按钮（issue #17：复制文件内容） ----------
+     挂在对话里的文件链接（<button>/<a>，文案即路径）紧邻位置，由 fileGuard.ts
+     注入。只屏内可见：桌面端不注入、不显示；这里再兜底一层，避免任何遗漏。
+     文件链接多为 inline，按钮用 inline-flex 紧跟其后即可。 */
+  [data-mobile-nav="copy-file"] {
+    display: inline-flex !important;
+    align-items: center;
+    justify-content: center;
+    margin-left: 6px !important;
+    vertical-align: baseline !important;
+    height: 22px !important;
+    padding: 0 8px !important;
+    border: 1px solid var(--dsw-alias-border-l1, rgba(0, 0, 0, .14)) !important;
+    border-radius: 6px !important;
+    background: var(--dsw-alias-bg-layer-1, #fff) !important;
+    color: var(--dsw-alias-label-primary, inherit) !important;
+    font-family: inherit !important;
+    font-size: 11px !important;
+    line-height: 1 !important;
+    cursor: pointer !important;
+    -webkit-tap-highlight-color: transparent !important;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, .12) !important;
+  }
+  [data-mobile-nav="copy-file"]:active {
+    background: var(--dsw-alias-interactive-bg-hover, rgba(0, 0, 0, .06)) !important;
+  }
+  [data-mobile-nav="copy-file"][disabled] {
+    opacity: .55 !important;
+    cursor: default !important;
+  }
 }
 
 /* ---------- desktop: the mobile controls must never appear ---------- */
@@ -856,4 +988,5 @@ export const MOBILE_CSS = `
     display: none !important;
   }
 }
+
 `

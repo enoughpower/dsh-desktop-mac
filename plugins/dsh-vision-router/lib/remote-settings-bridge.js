@@ -1,5 +1,8 @@
 import { installLocalRemoteSettingsPermissionBridge } from './local-remote-settings-permission.js'
 import { installRemoteSettingsRiskConfirmationBridge } from './remote-settings-risk-confirmation.js'
+import { installSettingsIaClientPrelude } from './settings-ia-client-prelude.js'
+import { installLegacySettingsMigration } from './settings-migration.js'
+import { installV2SettingsIaIntegration } from './v2-settings-ia-integration.js'
 
 const SETTINGS_NS = 'vision-router'
 
@@ -14,6 +17,9 @@ export const REMOTE_SETTINGS_READABLE_FIELDS = Object.freeze([
   'providers',
   'routing',
   'reverseRouting',
+  'routingMode',
+  'routingPreference',
+  'backgroundBenchmarking',
   'textProvider',
   'tool',
   'structuredVisionBootstrap',
@@ -31,6 +37,7 @@ export const REMOTE_SETTINGS_READABLE_FIELDS = Object.freeze([
   'cacheMaxEntries',
   'timeoutMs',
   'visionTaskTimeoutMs',
+  'visionTurnBudgetMs',
   'ocrTimeoutMs',
   'freeFallback',
   'freeCloudFirst',
@@ -215,4 +222,7 @@ export function installVisionRouterRemoteSettingsBridge(ctx, logger) {
   })
   installRemoteSettingsRiskConfirmationBridge(ctx)
   installLocalRemoteSettingsPermissionBridge(ctx, logger)
+  installV2SettingsIaIntegration(ctx)
+  installSettingsIaClientPrelude(ctx)
+  installLegacySettingsMigration(ctx, logger)
 }

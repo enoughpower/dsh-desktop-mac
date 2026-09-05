@@ -4,24 +4,34 @@
 
 <h1 align="center">dsh-vision-router</h1>
 
-<p align="center"><strong>Paste an image and it just works — eyes for text-only agents on DeepSeek Harness. Free out of the box, no key, no Python, one command.</strong></p>
+<p align="center"><strong>Turn vision on when you need it — eyes for text-only agents on DeepSeek Harness. Free out of the box, no key, no Python, one command.</strong></p>
 
-<p align="center">DeepSeek keeps thinking; the built-in free vision chain and fourteen deep tools do the seeing. Image turns behave like ordinary tool-calling turns — grounded, measurable, repeatable.</p>
+<p align="center">DeepSeek keeps thinking; the built-in free vision chain and fourteen deep tools do the seeing. When an image matters, enable the composer’s “👁 Vision” control and use image turns like ordinary tool-calling turns — grounded, measurable, repeatable.</p>
 
 <p align="center">
   <a href="https://awesome-dsh-plugin.com"><img src="https://awesome-dsh-plugin.com/badge.svg" alt="awesome · DSH plugin" /></a>
-  <a href="https://github.com/zp-home/dsh-recommend"><img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fzp-home%2Fdsh-recommend%2Fmain%2Fdata%2Fbadges%2Fysr666__dsh-vision-router.certified.json&amp;style=flat-square" alt="dsh-recommend 🏅 精选认证" /></a>
-  <a href="https://github.com/zp-home/dsh-recommend"><img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fzp-home%2Fdsh-recommend%2Fmain%2Fdata%2Fbadges%2Fysr666__dsh-vision-router.json&amp;style=flat-square" alt="dsh score 0.90" /></a>
-  <a href="https://dshplugin.app/plugins/dsh-vision-router"><img src="https://img.shields.io/badge/DSHPlugin.app-listed-555?style=flat-square" alt="Listed on DSHPlugin.app" /></a>
+  <a href="https://github.com/zp-home/dsh-recommend"><img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fzp-home%2Fdsh-recommend%2Fmain%2Fdata%2Fbadges%2Fysr666__dsh-vision-router.certified.json&amp;style=flat-square" alt="dsh-recommend 🏅 certified" /></a>
+  <a href="https://www.dshbase.com/plugins/dsh-vision-router/"><img src="https://img.shields.io/badge/dshbase-install--tested-2EA44F?style=flat-square" alt="dshbase install-tested" /></a>
+  <a href="https://github.com/SoberReport-AI/DeepGuard/blob/main/reports/dsh-vision-router/2.0.1/39c8f2b2d69aa398418fd6c8ab40b691a92a1a3d.json"><img src="https://img.shields.io/badge/DeepGuard-audit%20clean-2EA44F?style=flat-square" alt="DeepGuard audit clean" /></a>
+  <a href="https://whyihaveyou.github.io/dsh-suite/"><img src="https://img.shields.io/badge/featured%20on-dsh--suite-4d6bfe?style=flat-square" alt="featured on dsh-suite" /></a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/ysr666/dsh-vision-router/releases/tag/v1.7.1"><img src="https://img.shields.io/badge/release-v1.7.1-5B4CF0?style=flat-square" alt="Release v1.7.1" /></a>
-  <a href="tests"><img src="https://img.shields.io/badge/verified-657%20tests-2EA44F?style=flat-square" alt="Verified: 657 tests" /></a>
+  <a href="https://github.com/ysr666/dsh-vision-router/releases/tag/v2.1.0"><img src="https://img.shields.io/badge/release-v2.1.0-5B4CF0?style=flat-square" alt="Release v2.1.0" /></a>
+  <a href="tests"><img src="https://img.shields.io/badge/verified-Node%2022%20%2B%2024-2EA44F?style=flat-square" alt="Verified: Node 22 + 24" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2EA44F?style=flat-square" alt="License: MIT" /></a>
   <a href="package.json"><img src="https://img.shields.io/badge/Node.js-%3E%3D22-339933?style=flat-square&amp;logo=nodedotjs&amp;logoColor=white" alt="Node.js >=22" /></a>
   <img src="https://img.shields.io/badge/runtime-no%20Python-8A2BE2?style=flat-square" alt="No Python" />
-  <a href="cordis.patch.yml"><img src="https://img.shields.io/badge/DSH-Web%20profile-5B4CF0?style=flat-square" alt="DSH Web profile" /></a>
+</p>
+
+<p align="center">
+  <sub>Ecosystem:</sub>
+  <a href="https://dshplugin.app/plugins/dsh-vision-router">DSHPlugin.app</a> ·
+  <a href="https://github.com/diegosouzapw/awesome-omni-dsh-plugins">Awesome Omni DSH Plugins</a> ·
+  <a href="https://dshpluginhub.ai/plugins/dsh-vision-router">dshpluginhub.ai</a> ·
+  <a href="https://www.dsh.plus/en/plugins/dsh-vision-router/">dsh.plus</a> ·
+  <a href="https://dshplugins.ai/">dshplugins.ai</a> ·
+  <a href="https://dshmarket.com/p/ysr666/dsh-vision-router/">dsh-market</a>
 </p>
 
 <p align="center">English · <a href="README.zh.md">中文</a></p>
@@ -29,9 +39,9 @@
 <p align="center">💬 <strong>QQ community group: 1105463028</strong></p>
 
 > [!WARNING]
-> 📌 **Announcement (v1.7.1)**
+> 📌 **Announcement (v2.1.0)**
 >
-> **v1.7.1:** Remote settings can now be enabled after an explicit risk confirmation.
+> **v2.1.0:** Native five-card Settings, explicit Vision mode, runtime i18n, hardened capability routing/benchmarks, and the DSH rc.8 support floor. [What’s new →](docs/releases/v2.1.0.md)
 
 <p align="center">
   <img src="assets/vision-demo.gif" width="640" alt="Demo: paste an image, the agent locates the send button with vision_ground / vision_crop / vision_pixel_diff and answers with coordinates" />
@@ -54,7 +64,7 @@
 
 ## Why this exists
 
-Most DSH vision plugins bridge images to DeepSeek as *text descriptions* — lossy, one-shot, and blind to pixels. This plugin keeps the **original pixels on the vision model's side** and DeepSeek on the reasoning side, and makes looking at an image an **ordinary tool call**:
+Most DSH vision plugins bridge images to DeepSeek as *text descriptions* — lossy, one-shot, and blind to pixels. This plugin keeps the **Host-canonical image pixels on the vision model's side** and DeepSeek on the reasoning side, and makes looking at an image an **ordinary tool call**:
 
 - **One command install.** The package ships its own composition patch (`dsh.bundle.patch`): `dsh plugin add` wires the row, the admission wrapper and the attachment limits automatically — zero manual file edits. Taking over the official DeepSeek route is an optional setting (stealth mode, off by default).
 - **Free by default.** Vision tools end with a five-model OVHcloud anonymous fallback: no account, no key, 2 requests/minute per IP per model, roughly 10 RPM in theory across independent buckets. User-provided vision models run first.
@@ -67,11 +77,14 @@ Most DSH vision plugins bridge images to DeepSeek as *text descriptions* — los
 
 **One-line take**: most dsh vision plugins turn images into *text descriptions* for DeepSeek
 (description bridge — lossy); this plugin hands the image turn *straight to a vision model*
-(routing bridge — pixel-faithful), with a built-in keyless free fallback.
+(routing bridge — pixel-level), with a built-in keyless free fallback.
+
+> [!NOTE]
+> On DSH 0.1.2-alpha.1+, attachments remain Host-owned. Vision Router consumes the Host-persisted canonical image: clean single-frame 8-bit sRGB/sRGBA images inside the configured normalization limits can pass through byte-identically, while images that need orientation, color-space, metadata, animation, or size normalization may be re-encoded. Pixel tools therefore promise the Host-canonical raster, not preservation of the uploader's original encoded bytes.
 
 | | Manual model switching | MCP vision bridge | dsh-vision-router |
 |---|---|---|---|
-| Pixel fidelity | ✅ full (when switched) | ❌ text description only | ✅ full, on the image turn |
+| Image pixels | ✅ available (when switched) | ❌ text description only | ✅ Host-canonical raster, on the image turn |
 | Automatic | ❌ | ✅ | ✅ |
 | Daily model untouched | ❌ (whole session swapped) | ✅ | ✅ |
 | Provider failure recovery | ❌ | ❌ | ✅ fallback chains |
@@ -83,7 +96,7 @@ Most DSH vision plugins bridge images to DeepSeek as *text descriptions* — los
 
 | Project | Approach | What this plugin adds |
 |---|---|---|
-| [dsh-vision-sidecar](https://github.com/121103qwq/dsh-vision-sidecar) | Pre-describes images with an external VLM; the description joins the session as a message to DeepSeek; LLM7.io anonymous endpoint by default (OVHcloud listed as a no-key alternative) | Description bridge; this plugin adds raw-image routing, with `vision_describe` covering descriptions on demand |
+| [dsh-vision-sidecar](https://github.com/121103qwq/dsh-vision-sidecar) | Pre-describes images with an external VLM; the description joins the session as a message to DeepSeek; LLM7.io anonymous endpoint by default (OVHcloud listed as a no-key alternative) | Description bridge; this plugin adds image routing, with `vision_describe` covering descriptions on demand |
 | [dsh-vision-proxy](https://github.com/Flyvhidbwo/dsh-vision-proxy) | Wraps a provider route and transcribes images into text in the request stream | Transcription bridge; this plugin wraps no provider — it rewrites routing through `agent/request` waterfalls |
 | [dsh-vision-provider](https://github.com/libinyam/dsh-vision-provider) | Registers `DeepSeek + Vision` combined routes: images are described by the chosen vision model before reaching DeepSeek | Two-model bridge idea; this plugin adds automatic routing, fallback chains and tools on top |
 | [modlens](https://github.com/liustack/modlens) | The first dsh vision plugin; reuses local Claude Code/Codex/OpenCode/Pi logins as vision engines | Engine-reuse idea; this plugin ships its own provider chain and depends on no other local CLI |
@@ -137,26 +150,30 @@ If you already installed the DSH CLI globally and `dsh` is on `PATH`, the shorte
 > [!NOTE]
 > If you install the plugin **into a Web process that was already running long-term**, let that DSH Web process reload once so the plugin bundle itself is discovered. After the plugin is loaded, adding/removing models or changing wrapper scope **hot-updates without further DSH restarts**.
 
-### 2. Switch to a “+ Auto Vision” model group in chat
+### 2. Pick your normal model, then enable “👁 Vision” when needed
 
-Once loaded, the plugin discovers the model groups enabled under **Settings → Models** and creates same-name auto-vision entries. For example:
-```text
-opencode-go                 ← original model group, unchanged
-opencode-go + Auto Vision   ← choose this when sending images
-```
+The stock model selector in the lower-right corner still chooses your **brain/conversation model** — DeepSeek, Qwen, or any other ordinary route. Vision Router’s generated “+ Auto Vision” wrappers remain real Host routes for image admission, but are hidden from the stock picker and `/model` when ownership can be established safely.
+
+When you need image input, explicitly click **“👁 Vision”** beside the composer:
+
+- `👁 Vision`: the ordinary model is active and Vision is off;
+- `👁 Vision ✓`: Vision Router has switched the session to that model’s internal vision wrapper;
+- the mode persists across sends and **does not auto-reset**;
+- turning it off switches back to the same ordinary model; choosing a different ordinary model turns Vision off;
+- changing only reasoning effort keeps Vision on.
 
 > [!IMPORTANT]
-> **Before sending an image, open the model selector in the lower-right corner of the chat composer and choose a group marked “+ Auto Vision”.**
+> **Pasting or uploading an image does not enable Vision automatically. Before sending an image, make sure the control shows `👁 Vision ✓`.**
 >
-> Vision Router deliberately **does not modify the original model group**. If the conversation still uses the original text-only opencode / DeepSeek route, DSH can reject the image with “the current model does not support images” *before Vision Router gets a chance to handle it*. That is a model-entry selection issue, not a broken vision backend.
-
-The auto-vision group follows the live DSH model catalog. Adding models or changing wrapper scope does not require a restart.
+> The real wrapper route is still present underneath to satisfy DSH image admission. Hiding is presentation-only and fails open: if the browser cannot confidently prove a route belongs to Vision Router, that route remains visible rather than risking hiding a third-party provider.
 
 ### 3. Paste or upload the image
 
-After choosing the “+ Auto Vision” model group, paste or upload an image normally. By default the complete vision tool schema is stable from session start, so the agent can immediately use `vision_describe`, `vision_ground`, `vision_crop`, and the rest across multiple steps when needed.
+With “👁 Vision” enabled, paste or upload an image normally. By default the complete vision tool schema is stable from session start, so the agent can immediately use `vision_describe`, `vision_ground`, `vision_crop`, and the rest across multiple steps when needed.
 
-The built-in anonymous OVH vision fallback is already configured, so normal image use needs no signup or API key. **The lower-right chat picker selects only the brain/conversation model**; vision backends do not belong there. Advanced options live under **Settings → Plugins → Plugin config → 视觉路由（自动识图）**: each vision-backend row may select any callable generative user model already configured under **Settings → Models**. DSH image-capability metadata is advisory only: undeclared or text-only-labelled models remain selectable and show a warning. At runtime Vision Router always tries the provider's registered DSH adapter first — including WebSocket, RPC and private transports — and falls through on a real failure. The direct compatibility bridge is used only when an http(s) OpenAI Chat Completions endpoint is positively identified. Leaving every user row empty is valid; the OVH chain remains the final fallback. `Vision HTTP` is an internal transport route, not a model group users should select.
+If the session already contains images, DSH may reject switching from a vision wrapper back to a text-only route. Vision Router does not bypass that Host rule: it shows a transient error using the same interaction style as the stock model selector, keeps the real current model unchanged, and leaves `👁 Vision ✓` reflecting the actual state so the session stays usable.
+
+The built-in anonymous OVH vision fallback is already configured, so normal image use needs no signup or API key. **The lower-right chat picker selects only the brain/conversation model**; vision backends do not belong there. Advanced options live under **Settings → Vision Router**: each vision-backend row may select any callable generative user model already configured under **Settings → Models**. DSH image-capability metadata is advisory only: undeclared or text-only-labelled models remain selectable and show a warning. At runtime Vision Router always tries the provider's registered DSH adapter first — including WebSocket, RPC and private transports — and falls through on a real failure. The direct compatibility bridge is used only when an http(s) OpenAI Chat Completions endpoint is positively identified. Leaving every user row empty is valid; the OVH chain remains the final fallback. `Vision HTTP` is an internal transport route, not a model group users should select.
 
 ### See it in action
 
@@ -190,10 +207,12 @@ Any of these channels can join the vision chain as an `httpProviders` entry (key
 
 ## Highlights
 
+- **Capability-aware Auto routing.** Keep configured order for deterministic control, or explicitly enable Auto to prioritize already-configured models using measured capability evidence. Auto never infers capability from model names, and enabling Auto alone does not start benchmarks.
+- **Verifiable model profiling.** Exact Test Vision sends one request to one exact model; Quick and Full benchmark OCR / general / structured / document / grounding capabilities. Background profiling is separately authorized and yields to real foreground vision work.
 - **Original pixels, real answers.** The vision chain reads the image at original resolution (auto-downscaled only to protect latency/quota); the agent's question travels with the image, so answers are about *your* question, not a generic description.
 - **Automatic failover with classified errors.** Region blocks, ToS filtering, 402 quota, 429 rate limits, context overflow, network failures — the chain walks providers one by one and only reports after all of them failed, with actionable advice. A 429 immediately advances to the next backend and opens a Retry-After-aware cooldown instead of sleeping inside the request.
 - **Image memory.** Vision answers are cached by attachment content hash; later text turns substitute the recorded description (marked as untrusted evidence), so DeepSeek genuinely remembers earlier images without re-spending vision calls.
-- **A verifiable pixel loop.** Reference → `vision_html_screenshot` → `vision_pixel_diff` (ratio + red heatmap + worst-region ranking) → fix → repeat until the mismatch converges. UI restoration becomes measurable instead of eyeballed.
+- **A verifiable pixel loop.** Reference → `vision_html_screenshot` → `vision_pixel_diff` (ratio + worst 8×8-grid regions) → fix → repeat until the mismatch converges. UI restoration becomes measurable instead of eyeballed.
 - **Stable tool schema.** All fourteen deep tools are registered from session start by default, avoiding a mid-conversation tool-list expansion that can invalidate long-context KV/prefix caches. `progressiveTools: true` remains an advanced boot-time opt-in; only then does `vision_activate` mount the tools on demand. See [`docs/progressive-tools-cache.md`](docs/progressive-tools-cache.md).
 - **Selective proxy.** Only the configured vision provider hosts go through your local proxy; DeepSeek stays direct.
 
@@ -280,7 +299,7 @@ Failures are classified (region / tos / quota / rate-limit / context / network) 
 
 ## Stealth mode
 
-Stealth mode is **off by default** (explicit opt-in since issue #34): with it off, the official `deepseek-official` route stays untouched and image turns go through the visible "DeepSeek + 自动识图" wrapper entry in the picker.
+Stealth mode is **off by default** (explicit opt-in since issue #34): with it off, the official `deepseek-official` route stays untouched. When you need images, the composer’s “👁 Vision” control switches to the internal DeepSeek wrapper, which is hidden from the stock picker and `/model` presentation by default.
 
 With stealth on, the plugin takes over the official `deepseek-official` route: the model picker looks exactly like stock (same DeepSeek group, same model names), but each entry is the auto-vision wrapper that declares image input and delegates text turns to a rebuilt native DeepSeek adapter (same `llm-deepseek` settings section and credentials). Old sessions keep working through the hidden `deepseek-vision` alias. The takeover requires the stock row to be absent — disable it in your profile patch layer (`~/.dsh/profiles/<profile>/cordis.patch.yml`):
 
@@ -290,52 +309,51 @@ With stealth on, the plugin takes over the official `deepseek-official` route: t
   disabled: true
 ```
 
-With the stock row present, the plugin falls back to the visible wrapper entry. Conversely, with stealth off but the stock row still disabled, the plugin performs a keep-alive takeover so the DeepSeek models don't vanish (the settings card explains this); to restore the fully official route, flip the `disabled` above back to `false` and restart.
+With the stock row present, the plugin keeps the official route and uses the internal wrapper through “👁 Vision”. Conversely, with stealth off but the stock row still disabled, the plugin performs a keep-alive takeover so the DeepSeek models don't vanish (the settings card explains this); to restore the fully official route, flip the `disabled` above back to `false` and restart.
 
-> Stealth mode **only affects the official DeepSeek route**. Custom/third-party routes such as opencode are auto-wrapped into “+ Auto Vision” groups by default.
+> Stealth mode **only affects the official DeepSeek route**. Custom/third-party routes such as opencode also receive internal vision wrappers by default, used through the composer toggle rather than a second user-facing model group.
 
-## Auto-vision model groups and manual wrappers
+## Auto-vision wrappers and manual scope
 
-`autoWrapProviders` is on by default. The plugin discovers the provider/model entries currently enabled under **Settings → Models** and registers a same-name “+ Auto Vision” model group for them. **The original group is never changed**: choose the auto-vision group for images, or keep using the original group for plain text. DSH `llm/adapters-updated` events are synced live, so adding/removing models does not require a restart.
+`autoWrapProviders` is on by default. The plugin discovers the provider/model entries currently enabled under **Settings → Models** and registers matching internal vision wrappers. **The original group is never changed.** Ordinary users do not need to find or manually select these routes: when ownership is confidently established, the wrappers are hidden from the stock picker and `/model`, and the composer’s “👁 Vision” control switches to them as needed. DSH `llm/adapters-updated` events are synced live, so adding/removing models does not require a restart.
 
 `wrappedProviders` is an **optional manual scope control**, not a required setup step. Use it only when:
 
-1. automatic wrapping is off and you want to pick which provider/models receive an auto-vision entry; or
-2. automatic wrapping remains on but one provider should expose only selected models in its “+ Auto Vision” group.
+1. automatic wrapping is off and you want to choose which provider/models can use “👁 Vision”; or
+2. automatic wrapping remains on but one provider should generate wrappers for only selected models.
 
-The settings card uses provider + model dropdowns; an empty model means every model on that route. Add multiple rows to select multiple models. Changes apply immediately with no restart.
+The settings card uses provider + model dropdowns; an empty model means every model on that route. Add multiple rows to select multiple models. Changes apply immediately with no restart. If browser-side ownership or exact mirroring cannot be established, presentation hiding fails open so a third-party route is never hidden merely for cosmetic cleanliness.
 
 ## Web settings
 
-The Web profile registers a **视觉路由（自动识图）** card under **Settings → Plugins → Plugin config**. Its top callout spells out the only step most users need: **return to chat → lower-right model selector → choose a “+ Auto Vision” model group → send the image**. The remaining controls are advanced customization:
+The Web profile registers a first-class **Settings → Vision Router** surface. Its General page keeps model choice and v2 routing authority together; Vision Strategy, Local & Device, Advanced and Diagnostics separate tool behavior, local backends, sensitive/performance controls and troubleshooting.
 
-- **Auto-create “+ Auto Vision” model groups**: enabled by default; follows the live model catalog with no restart;
-- **Manual auto-vision scope (optional)**: only for disabling auto-wrap or limiting selected models;
-- **Vision backend chain**: the real image-capable models used by `vision_describe` and friends; the built-in free Qwen is normally enough, and text-only models should not be placed here;
-- switches for legacy whole-turn routing, vision tools, image-block rewriting and stealth mode (official DeepSeek route only);
-- timeout, wrapper/chain route names, proxy and other advanced parameters;
-- every field shows an overridden badge with one-click reset plus discard/save;
-- a **Test connection** button prioritizes an enabled local backend, verifies that its configured model appears in `/v1/models`, and otherwise probes the first usable vision provider;
-- artifact-producing tools render dedicated call cards with result facts and open-file buttons.
+- **Vision model chain**: the real image-capable models used by `vision_describe` and friends; the built-in free chain remains the final fallback;
+- **Model selection**: keep the configured order, or explicitly enable capability-aware Auto with Balanced / Quality / Speed / Local preference;
+- **Background capability data**: `off`, `local-free`, or `all`; this is separately authorized and never turns on merely because Auto was enabled;
+- **Test Vision / Benchmark**: exact one-request image verification plus Quick (~3 requests, OCR + General) and Full (~6 requests, Structured + OCR + Document + Grounding + General) profiling; benchmark work continues if Settings is closed;
+- **Local & Device**: Ollama / LM Studio and privacy-gated desktop screenshot controls;
+- **Advanced / Diagnostics**: timeout, wrapper scope, proxy/network, compatibility, version, runtime status and troubleshooting.
 
 <p align="center">
-  <img src="assets/vision-settings.png" width="72%" alt="The vision-router card in Settings > Plugins > Plugin config." />
+  <img src="assets/vision-settings.png" width="72%" alt="The Vision Router settings surface." />
 </p>
-
-> PR [#8](https://github.com/ysr666/dsh-vision-router/pull/8) upgrades the panel with catalog-driven model dropdowns, add/remove fallback rows, and proxy settings.
 
 ## Configuration
 
-Everything is optional; defaults work out of the box. Edit via the Web card or a profile patch:
+Everything is optional; defaults work out of the box. Prefer **Settings → Vision Router**; profile overrides remain available for advanced deployments:
 
 | Field | Default | Meaning |
 |---|---|---|
+| `routingMode` | `ordered` | `ordered` keeps the configured model-chain order; `auto` delegates prioritization to measured capability evidence. Auto is never enabled by migration |
+| `routingPreference` | `balanced` | Auto preference: `balanced`, `quality`, `speed`, or `local`; changes ordering only among already-authorized candidates |
+| `backgroundBenchmarking` | `off` | background capability profiling authority: `off`, `local-free`, or `all`; enabling Auto does not change it, and authorized background work runs only while Auto is active |
 | `provider` / `model` | `vision-http` / `ovh/Qwen2.5-VL-72B-Instruct` | shorthand **vision backend** route (adapter-backed provider + model that genuinely accepts images) |
 | `fallbacks` | `[]` | backup image models for the shorthand vision provider |
 | `providers` | built-in free `vision-http` pair | multi-provider **vision backend** chain `{ provider, model, fallbacks[] }`, tried in order; do not put text-only models here |
 | `httpProviders` | built-in OVH entry | direct OpenAI-compatible endpoints `{ name, baseURL, model, apiKeyEnv, maxTokens }` |
-| `autoWrapProviders` | `true` | discover enabled provider/models and live-sync same-name “+ Auto Vision” groups; original groups stay unchanged |
-| `wrappedProviders` | `[{ provider: 'deepseek-official', models: [] }]` | optional manual wrapper scope `{ provider, models[] }`, used after disabling auto-wrap or to restrict one provider to selected models; changes apply live, no restart |
+| `autoWrapProviders` | `true` | discover enabled provider/models and live-sync their internal vision wrappers; confidently owned wrappers are hidden from the stock model picker while original groups stay unchanged |
+| `wrappedProviders` | `[{ provider: 'deepseek-official', models: [] }]` | optional manual wrapper scope `{ provider, models[] }`, used after disabling auto-wrap or to restrict which models can enter an internal wrapper through “👁 Vision”; changes apply live, no restart |
 | `routing` | `false` | legacy whole-turn chain routing (one-shot answer). `false` = tools-first flow (recommended) |
 | `reverseRouting` | `true` | with `routing: true`, route text turns back to `textProvider` |
 | `wrapperRoute` / `chainRoute` | `deepseek-vision` / `vision-chain` | admission wrapper route name / fallback chain route name (empty disables) |
@@ -345,26 +363,21 @@ Everything is optional; defaults work out of the box. Edit via the Web card or a
 | `rewriteImages` | `true` | rewrite image blocks in the model input (cached description or tool-hint marker); the UI log keeps images |
 | `desktopScreenshot` | `false` | privacy opt-in for the model-callable `vision_screenshot` desktop-capture tool; checked live before every capture |
 | `freeFallback` | `true` | append the anonymous OVH models after explicit local/custom HTTP backends; turning this off never disables an explicitly configured local backend |
-| `localOllama` | `{ enabled: false, baseURL: 'http://127.0.0.1:11434/v1', model: 'qwen2.5vl', format: 'openai' }` | **Local vision backend (merged from dsh-vision)**: when enabled, `local-ollama` leads the HTTP vision chain; skipped automatically when Ollama is down; `format` selects `openai` (`/chat/completions`) or `anthropic` (`/messages`); optional `temperature` / `top_p` are sent only when explicitly set. v1.7 prewarms loopback models and renews a 30-minute residency so cold loading is not charged to the normal inference deadline |
-| `localLmStudio` | `{ enabled: false, baseURL: 'http://localhost:1234/v1', model: '', format: 'openai' }` | **Local LM Studio backend (merged from dsh-vision)**: follows Ollama and precedes custom/cloud HTTP backends; enabling it requires the real model identifier shown in LM Studio Developer or returned by `/v1/models`; supports the same optional sampling fields, while `format: 'anthropic'` requires LM Studio 0.4.1+ |
-| `instantDescribe` | `false` | **Instant local translation (merged from dsh-vision)**: when on and at least one local backend is usable, uncached image blocks are recognized before the first model step; Ollama is tried before LM Studio with a shared timeout budget, multi-image batches run concurrently (up to 3), and failures fall back to the static tool-hint marker |
-| `localDescribeStyle` | `plain` | **Local recognition output style (merged from dsh-vision)**: `plain` = flat description; `structured` = structured recognition (【初步判断】/【细节】/【空间结构】/【原图尺寸】), better for screenshot analysis |
+| `localOllama` | `{ enabled: false, baseURL: 'http://127.0.0.1:11434/v1', model: 'qwen2.5vl', format: 'openai' }` | local vision backend; when enabled, `local-ollama` leads the HTTP vision chain, is skipped automatically when down, and supports OpenAI or Anthropic wire format |
+| `localLmStudio` | `{ enabled: false, baseURL: 'http://localhost:1234/v1', model: '', format: 'openai' }` | local LM Studio backend after Ollama; enter the exact model identifier from LM Studio Developer or `/v1/models` |
+| `visionTurnBudgetMs` | `0` | whole-turn vision wall-clock budget; `0` means unlimited. Concrete provider calls/tools still keep their own hard deadlines |
 | `downscale` / `downscaleMaxPixels` | `true` / `4000000` | pre-call downscale and its pixel budget (latency guard) |
 | `cache` / `cacheTtlSeconds` / `cacheMaxEntries` | `true` / `3600` / `200` | vision answer cache |
 | `timeoutMs` | `120000` | per vision call deadline |
 | `artifactsDir` | `.dsh-vision-router/artifacts` | artifact directory (relative to the session workspace) |
 | `proxy` / `proxyHosts` | `''` / openrouter hosts | optional proxy for vision provider hosts only |
-| `catalogCorrections` | `true` | built-in catalog-routing corrections: when the installed pi-ai catalog routes a known model to the wrong wire protocol (e.g. `opencode-go/qwen3.6-plus` to OpenAI chat completions while OpenCode Go only serves it on `/v1/messages`), the plugin answers that backend directly over the corrected protocol. Each correction disarms itself once the catalog is fixed upstream |
+| `catalogCorrections` | `true` | built-in catalog-routing corrections for known upstream wire-protocol mismatches; each correction disarms itself once the catalog is fixed upstream |
 
 ### Local Ollama vision backend (merged from dsh-vision)
 
 > **Incremental author**: [shaoqiuyuavailable](https://github.com/shaoqiuyuavailable) (router local-vision increment)
 >
-> **Design credit**: the local vision backends (Ollama / LM Studio dual backends, instant recognition,
-> structured output, screenshot identification, same-image memory dedup, failure-fallback placeholder,
-> concurrency anti-snowball, timeout protection) inherit their design from
-> [dsh-vision](https://github.com/shaoqiuyuavailable/text-llm-vision/tree/dsh-vision) —
-> merged into the HTTP vision chain here, with per-level fallback and dual-protocol support added on top.
+> **Design credit**: the local vision backends (Ollama / LM Studio dual backends, structured recognition, screenshot identification, same-image memory dedup, failure fallback, concurrency protection and timeout handling) inherit their design from [dsh-vision](https://github.com/shaoqiuyuavailable/text-llm-vision/tree/dsh-vision) — merged into the HTTP vision chain here, with per-level fallback and dual-protocol support added on top.
 
 An optional keyless local-first vision path for private, free, offline recognition. It plugs into the existing HTTP vision chain as `local-ollama`; if it fails, any configured cloud backends can still be tried unless you deliberately configure a local-only chain.
 
@@ -375,35 +388,32 @@ An optional keyless local-first vision path for private, free, offline recogniti
 ollama pull qwen2.5vl
 ```
 
-**2. Enable it** — in the settings card's "Local vision" group, or via a profile patch:
+**2. Enable it** — under **Settings → Vision Router → Local & Device**, or via a profile patch:
 
 ```yaml
 - id: vision-router
   config:
     localOllama:
       enabled: true
-      baseURL: 'http://127.0.0.1:11434/v1'   # OpenAI-compatible endpoint
+      baseURL: 'http://127.0.0.1:11434/v1'
       model: 'qwen2.5vl'
-      temperature: 0.5                        # optional; low temperature is steadier for recognition
-      top_p: 0.8                              # optional; unset = server default
-    instantDescribe: true                     # recognize images on the first model step
-    localDescribeStyle: 'structured'          # 'plain' | 'structured'
+      temperature: 0.5
+      top_p: 0.8
 ```
 
 **3. What happens**
 
 - When enabled, `local-ollama` heads the HTTP vision chain. For a strict local-only setup, remove cloud vision rows/custom HTTP endpoints and turn off `freeFallback`.
-- **v1.7 cold-start handling:** the selected loopback Ollama model is prewarmed through Ollama's native API and kept resident for 30 minutes. If it is cold when Ollama is the primary image backend, loading completes before the normal vision-task budget starts; a short `/api/ps` probe keeps a dead service on the fast fallback path. Remote Ollama URLs are never auto-warmed.
-- **LM Studio works the same way** — enable `localLmStudio` in the same "Local vision" group with its OpenAI-compatible endpoint (default `http://localhost:1234/v1`) and enter the exact model identifier shown in Developer or `/v1/models`. It sits after `local-ollama` and before custom/cloud HTTP backends.
+- The selected loopback Ollama model is prewarmed through Ollama's native API and kept resident for 30 minutes. If it is cold when Ollama is the primary image backend, loading completes before the normal vision-task budget starts; a short `/api/ps` probe keeps a dead service on the fast fallback path. Remote Ollama URLs are never auto-warmed.
+- **LM Studio works the same way** — enable `localLmStudio` with its OpenAI-compatible endpoint (default `http://localhost:1234/v1`) and enter the exact model identifier shown in Developer or `/v1/models`. It sits after `local-ollama` and before custom/cloud HTTP backends.
 - Each local backend can speak **OpenAI or Anthropic format** via `format` (default `openai`). Anthropic mode routes to `/v1/messages` with `anthropic-version` and base64 image sources; `x-api-key` is sent only when a key is configured. LM Studio needs version 0.4.1 or newer for this endpoint.
 - If a local backend is down or the call times out, its entry is skipped automatically and the chain falls through to the cloud backends — no call breaks.
-- `instantDescribe` tries enabled local backends in order (Ollama, then LM Studio) before the first model step. Multiple uncached images run concurrently (up to 3); one failed image does not block the others, and attachment-memory hits are reused without another local request.
 - `vision_screenshot` is disabled by default. After the separate Desktop screenshot opt-in, `identify=true` uses the same Ollama → LM Studio fallback.
-- Verify runtime decisions with `image turn — instantDescribe=… localBackends=…` and results with `instant local describe recognized N/M uncached image(s), C cached, F failed attempts` in the log.
 
 ## Requirements
 
 - DeepSeek Harness Web profile. Normal installs can use `npx @deepseek-ai/dsh ...`; source checkouts use `pnpm dsh ...`. A bare `dsh ...` command only works when the CLI is already on your shell `PATH`.
+- **DSH Host support window:** DVR 2.1.x supports DSH `0.1.0-rc.8` (minimum), `0.1.1-rc.1` (previous released train), and current `0.1.1-rc.2`; DSH `0.1.2-alpha.4` is canary-only evidence. DVR 2.0.x was the final train with public support for rc.6/rc.7. See [DSH Host support window](docs/architecture/dsh-support-window.md).
 - Node ≥ 22 (host side).
 - No API key for the default free chain; a credential reference (`apiKeyEnv`) only for paid `httpProviders`.
 - Chrome / Chromium / Edge is needed only for `vision_html_screenshot`; every other tool works without a browser.
@@ -577,8 +587,11 @@ Manual fallback: in VS Code, use “Save with Encoding” → `UTF-8` (without B
 ## Star History
 
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/ysr666/dsh-vision-router/star-history/assets/star-history/star-history-dark.svg">
-    <img alt="Star history chart" src="https://raw.githubusercontent.com/ysr666/dsh-vision-router/star-history/assets/star-history/star-history-light.svg" width="100%">
-  </picture>
+  <a href="https://www.star-history.com/?repos=ysr666%2Fdsh-vision-router&type=date&legend=top-left">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=ysr666/dsh-vision-router&type=date&theme=dark&legend=top-left&sealed_token=bl3whaniTB54-d4wMda4a454thk48mT71wkNh8VrSD8OhCKWdBOOQpVKGUXzoEq4kx0_0jhQzEimHIqKAaGftFVV48sqgJ1niBfGy51AX5k_soGw_e7-5Nea6ZY5To0iz7jY9ORc5a_P5N6Qlfm32G2pdHf8_5dZeuHMn5NOZCyTgFcmq2eK1Jwg8ILe" />
+      <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=ysr666/dsh-vision-router&type=date&legend=top-left&sealed_token=bl3whaniTB54-d4wMda4a454thk48mT71wkNh8VrSD8OhCKWdBOOQpVKGUXzoEq4kx0_0jhQzEimHIqKAaGftFVV48sqgJ1niBfGy51AX5k_soGw_e7-5Nea6ZY5To0iz7jY9ORc5a_P5N6Qlfm32G2pdHf8_5dZeuHMn5NOZCyTgFcmq2eK1Jwg8ILe" />
+      <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=ysr666/dsh-vision-router&type=date&legend=top-left&sealed_token=bl3whaniTB54-d4wMda4a454thk48mT71wkNh8VrSD8OhCKWdBOOQpVKGUXzoEq4kx0_0jhQzEimHIqKAaGftFVV48sqgJ1niBfGy51AX5k_soGw_e7-5Nea6ZY5To0iz7jY9ORc5a_P5N6Qlfm32G2pdHf8_5dZeuHMn5NOZCyTgFcmq2eK1Jwg8ILe" width="100%" />
+    </picture>
+  </a>
 </p>

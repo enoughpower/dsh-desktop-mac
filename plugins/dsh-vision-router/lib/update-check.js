@@ -1,5 +1,6 @@
 import { createRequire } from 'node:module'
 import { METADATA_RESPONSE_MAX_BYTES, readResponseJsonBounded } from './http-body-limit.js'
+import { stripTrailingSlashes } from './string-normalization.js'
 
 const require = createRequire(import.meta.url)
 const packageJson = require('../package.json')
@@ -63,7 +64,7 @@ export function normalizeRegistryBase(value) {
     if (url.protocol !== 'https:' && url.protocol !== 'http:') return fallback
     url.search = ''
     url.hash = ''
-    url.pathname = url.pathname.replace(/\/+$/, '')
+    url.pathname = stripTrailingSlashes(url.pathname)
     return url.toString().replace(/\/$/, '')
   } catch {
     return fallback
@@ -81,15 +82,29 @@ function errorMessage(error) {
   return error && error.message ? error.message : String(error)
 }
 
+/**
+ * Every network attempt keeps its own hard timeout even when a caller also
+ * supplies a cancellation signal. The external signal remains authoritative:
+ * aborting it cancels immediately, while simply having one no longer disables
+ * the request timeout.
+ */
+function requestSignal(signal, timeoutMs) {
+  if (signal?.aborted) return signal
+  const parsed = Number(timeoutMs)
+  const delay = Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : 10_000
+  const timeoutSignal = AbortSignal.timeout(delay)
+  if (!signal) return timeoutSignal
+  return AbortSignal.any([signal, timeoutSignal])
+}
+
 async function fetchLatestVersion({ fetchImpl, registryBase, signal, timeoutMs }) {
   const endpoint = `${registryBase}/${encodeURIComponent(PACKAGE_NAME)}/latest`
   // Give every registry attempt its own timeout. In particular, a slow mirror
   // must not consume the signal used by the npmjs fallback attempt.
-  const requestSignal = signal ?? AbortSignal.timeout(timeoutMs)
   const response = await fetchImpl(endpoint, {
     method: 'GET',
     headers: { accept: 'application/json' },
-    signal: requestSignal,
+    signal: requestSignal(signal, timeoutMs),
   })
   if (!response.ok) throw new Error(`update registry returned HTTP ${response.status}`)
   const body = await readResponseJsonBounded(
@@ -102,16 +117,14 @@ async function fetchLatestVersion({ fetchImpl, registryBase, signal, timeoutMs }
   return latestVersion
 }
 
-
 async function fetchLatestReleaseVersion({ fetchImpl, releaseApi, signal, timeoutMs }) {
-  const requestSignal = signal ?? AbortSignal.timeout(timeoutMs)
   const response = await fetchImpl(releaseApi, {
     method: 'GET',
     headers: {
       accept: 'application/vnd.github+json',
       'user-agent': 'dsh-vision-router-update-check',
     },
-    signal: requestSignal,
+    signal: requestSignal(signal, timeoutMs),
   })
   if (!response.ok) throw new Error(`GitHub releases API returned HTTP ${response.status}`)
   const body = await readResponseJsonBounded(

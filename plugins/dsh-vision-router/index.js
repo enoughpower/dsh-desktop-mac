@@ -16,6 +16,19 @@
 // process fetch to route only the `proxyHosts` domains through it; everything
 // else (DeepSeek and the rest) stays on the direct connection.
 
+// Compatibility shim: dsh 0.1.2-alpha.4 removed `session.events` in favor of
+// `session.snapshotEvents()`. This helper returns an array (or undefined) that
+// works on both old and new harness versions.
+function getSessionEvents(session) {
+  if (!session) return undefined
+  // alpha.4+ : snapshotEvents() returns a frozen array of the event log
+  if (typeof session.snapshotEvents === 'function') {
+    try { return session.snapshotEvents() } catch { return undefined }
+  }
+  // pre-alpha.4 fallback
+  try { return session.events } catch { return undefined }
+}
+
 export * from './lib/vision-resilience.js'
 
 import z from '@deepseek-ai/schemastery'
@@ -54,6 +67,8 @@ import {
   VISION_FAILURE_KINDS,
   VISION_RESULT_CODES,
 } from './lib/vision-resilience.js'
+import { currentVisionExecutionOrder } from './lib/vision-execution-order.js'
+import { applyVisionExecutionOrder } from './lib/vision-execution-order-apply.js'
 import { createHash, randomBytes } from 'node:crypto'
 import {
   normalizeStructuredBootstrapResult,
@@ -61,7 +76,7 @@ import {
   structuredBootstrapQuestion,
 } from './lib/structured-bootstrap.js'
 import { planMixedBranches, renderMixedGuidance } from './lib/mixed-router.js'
-import { depthLimitFor, renderDepthGuidance } from './lib/depth-guidance.js'
+import { renderDepthGuidance } from './lib/depth-guidance.js'
 import { assertNoRepetitionLoop } from './lib/repetition-guard.js'
 import { compareRgbaStreams } from './lib/pixel-diff-stream.js'
 import {
@@ -71,6 +86,7 @@ import {
   scaleBox,
   scaledDimensions,
 } from './lib/image-resource-governor.js'
+import { createSessionVisionIndex } from './lib/session-vision-index.js'
 import { createSessionVisionStateStore } from './lib/session-vision-state.js'
 import {
   ERROR_RESPONSE_MAX_BYTES,
@@ -80,6 +96,8 @@ import {
   readResponseTextBounded,
 } from './lib/http-body-limit.js'
 import { writeArtifactFile } from './lib/artifact-boundary.js'
+import { stripTrailingSlashes } from './lib/string-normalization.js'
+import { parseVersionComparator } from './lib/version-range.js'
 
 // sharp is a native module with platform-specific prebuilt binaries. It used
 // to be imported statically, so a missing, broken, or conflicting install
@@ -151,10 +169,10 @@ export function versionSatisfies(version, range) {
     const clauses = alternative.split(/\s+/)
     if (clauses.length === 0) return false
     return clauses.every((clause) => {
-      const match = clause.match(/^(>=|<=|>|<|=)?\s*(.+)$/)
-      if (!match) return false
-      const op = match[1] ?? '='
-      const other = parseVersionParts(match[2])
+      const comparator = parseVersionComparator(clause)
+      if (comparator === undefined) return false
+      const { op } = comparator
+      const other = parseVersionParts(comparator.version)
       if (other === undefined) return false
       const cmp = compareVersionParts(parts, other)
       switch (op) {
@@ -284,11 +302,9 @@ export const Config = z.object({
   // evidence/deepening vision-tool call before answering (x >= 1). Off by
   // default because it adds at least two visual/tool calls to image turns.
   structuredVisionBootstrap: z.boolean().default(false),
-  // 看图深度档位（移植自 dsh-vision 的 PRECISION 档位概念）：
-  // fast = 本轮视觉调用上限 1 次（快速）；standard = 上限 2 次（bootstrap+1，
-  // 与现状等价）；deep = 上限 3-4 次（完整证据链）。档位只定「深度上限」，
-  // 模型在档位内按用户问题自选工具与轮次（保留 x 的自由度）。默认 standard
-  // = 现状行为逐字节不变。与场景路由正交：场景管出口、档位管深度。
+  // 看图深度档位只决定查证策略，不隐式限制调用次数：fast 整体优先，
+  // standard 围绕问题按需查证，deep 主动检查局部并交叉验证。独立的
+  // visionDepthMaxCalls 安全阀由 structured-flow hardening 统一执行。
   visionDepth: z.union(['fast', 'standard', 'deep']).default('standard'),
   // 引导文案覆盖（引导表可配置化）：kind = visual_kind（code/document/ui/chat）
   // 或 content_kind（person/animal/…/meme），text = 覆盖引导文案。
@@ -446,11 +462,11 @@ export function mediaTypeOf(path) {
 }
 
 /**
- * 看图深度档位（移植自 dsh-vision 的 PRECISION 概念）：档位定「深挖轮数
- * 上限」，bootstrap 那一遍不计入。fast=1、deep=4、standard=不硬拦（现状
- * 行为，仅提示词引导）。undefined = 不设硬上限。
+ * 兼容导出：depthLimitFor 仍保留给历史直接 index.js 使用者。当前 fast /
+ * standard / deep 只选择查证策略；只有显式 visionDepthMaxCalls > 0 时才
+ * 返回独立调用上限，0 / 未设置表示不限。
  */
-export { depthLimitFor }
+export { depthLimitFor } from './lib/depth-guidance.js'
 
 
 /**
@@ -791,6 +807,55 @@ export function planToolResultImageShadows(events, surfaceNodes, shouldStrip) {
     if (typeof shouldStrip !== 'function' || shouldStrip(seq, event) !== true) continue
     const sanitized = sanitizeToolResultMessage(message)
     if (sanitized !== message) plans.push({ seq, event, message: sanitized })
+  }
+  return plans
+}
+
+/** Ids of guard-stop messages this plugin ever injected for a session. */
+const PERSISTED_GUARD_STOP_SURFACE_ID = /^vision-router-structured-guard-stop-(?:\d+|undefined)$/
+
+/**
+ * Plan shadow replacements that keep persisted guard-stop messages off the
+ * model surface.
+ *
+ * Guard-stop orders (turn-budget / depth-quota exhausted) were injected as
+ * `user/message` events and persisted into session history. `agent/pre-step`
+ * only sees the inbox claim — never the historical surface — so no pre-step
+ * rewrite can catch them before `Session.deriveMessages()` feeds history to
+ * the adapter. A persisted guard-stop is then replayed on EVERY later turn as
+ * a standing "never call vision tools again" order, even though the per-turn
+ * budget/depth quota resets every turn: the first image in a session is
+ * recognized, but every later image answers "本轮视觉总时间预算已耗尽…"
+ * without calling any vision tool.
+ *
+ * Same harness surface-shadow mechanism as `planToolResultImageShadows`:
+ * replace the surface node with an inert note via `surfaceOp:{op:'replace'}`
+ * + `sourceEventSeqs`, so the human transcript keeps rendering the original
+ * while every later `deriveMessages()` projection sees the replacement.
+ * Durable, replayable, survives session resume. Match by id only, never by
+ * text: ids are plugin-owned, while the instruction text can legitimately
+ * appear inside user quotes or error transcripts.
+ *
+ * @param events - the session event log array (`session.events`).
+ * @param surfaceNodes - the ordered seqs of the current surface (`session.surface.nodes`).
+ * @returns [{ seq, event, data }] where data is the inert frozen replacement
+ * message payload for the append at `seq`.
+ */
+export function planGuardStopShadows(events, surfaceNodes) {
+  const plans = []
+  for (const seq of surfaceNodes ?? []) {
+    const event = events && events[seq]
+    if (!event || event.type !== 'user/message') continue
+    const data = event.data
+    if (!data || typeof data.id !== 'string' || !PERSISTED_GUARD_STOP_SURFACE_ID.test(data.id)) continue
+    plans.push({
+      seq,
+      event,
+      data: deepFreezeLocal({
+        ...data,
+        content: [{ type: 'text', text: '[vision-router: 系统提示已过期]' }],
+      }),
+    })
   }
   return plans
 }
@@ -2113,7 +2178,10 @@ export async function callLocalBackend(provider, messages, options = {}) {
     if (wire.length > 0 && wire[0].role !== 'user') {
       wire.unshift({ role: 'user', content: [{ type: 'text', text: '(conversation history)' }] })
     }
-    const baseURL = String(provider.baseURL).replace(/\/+$/, '').replace(/\/v1$/, '')
+    const normalizedBaseURL = stripTrailingSlashes(String(provider.baseURL))
+    const baseURL = normalizedBaseURL.endsWith('/v1')
+      ? normalizedBaseURL.slice(0, -3)
+      : normalizedBaseURL
     return callAnthropicCompatible(
       { ...provider, baseURL },
       wire,
@@ -3004,7 +3072,7 @@ export function isOpenAIHttpBridgeTransport(transport) {
   }
 }
 
-export function apply(ctx, config = {}) {
+export function apply(ctx, config = {}, runtime = {}) {
   // Route sharp version diagnostics (issue #75) through the harness logger
   // instead of console.warn, so the warning lands in the server log.
   registerSharpWarningHook((message) => {
@@ -3013,17 +3081,40 @@ export function apply(ctx, config = {}) {
   // Live configuration: composition entry at boot, then the resolved settings
   // section once the settings service mounts (installSettingsSection below).
   let current = () => config
+  const coreVisionSurfaceRuntime = runtime?.coreVisionSurface
+  const coreVisionFlag = (name, fallback) => {
+    if (
+      coreVisionSurfaceRuntime &&
+      typeof coreVisionSurfaceRuntime.current === 'function'
+    ) {
+      const surface = coreVisionSurfaceRuntime.current()
+      if (surface && typeof surface[name] === 'boolean') return surface[name]
+    }
+    return fallback()
+  }
   const pairs = () => providersOf(current())
   // #208: cross-turn visual knowledge belongs to a bounded session owner,
   // not to the plugin process. The compatibility facade is used only at
   // adapter boundaries that do not expose a Session; ambiguous attachment ids
   // deliberately miss instead of crossing conversations.
-  const visionState = createSessionVisionStateStore({
+  const sessionVisionRuntime = runtime?.sessionVision
+  const visionState = sessionVisionRuntime?.stateStore ?? createSessionVisionStateStore({
     maxSessions: 64,
     idleTtlMs: 60 * 60 * 1000,
     descriptionMaxEntries: 64,
     descriptionMaxChars: 256 * 1024,
     attachmentMaxEntries: 256,
+  })
+  const sessionVisionIndex = sessionVisionRuntime?.index ?? createSessionVisionIndex({
+    stateStore: visionState,
+    core: {
+      collectEventAttachmentRefs,
+      rewriteImageBlocks,
+      planToolResultImageShadows,
+      planGuardStopShadows,
+    },
+    config: () => current(),
+    logger: ctx.logger,
   })
   const imageMemory = visionState.descriptionFacade
   // #208 follow-up complete: session-visible paths use scoped memory; only
@@ -3069,8 +3160,20 @@ export function apply(ctx, config = {}) {
         text && typeof text.model === 'string' && text.model !== '' ? text.model : 'deepseek-v4-pro',
     }
   }
-  const toolEnabled = () => current().tool !== false
-  const structuredBootstrapEnabled = () => current().structuredVisionBootstrap === true
+  const toolEnabled = () =>
+    coreVisionFlag('toolAvailable', () => current().tool !== false)
+  const structuredBootstrapEnabled = () =>
+    coreVisionFlag(
+      'structuredBootstrap',
+      () => current().structuredVisionBootstrap === true,
+    )
+  const instantDescribeEnabled = () =>
+    coreVisionFlag('instantDescribe', () => current().instantDescribe === true)
+  const autoActivateOnImageEnabled = () =>
+    coreVisionFlag(
+      'autoActivateOnImage',
+      () => current().autoActivateOnImage !== false,
+    )
   const visionDepth = () => (current().visionDepth === 'fast' || current().visionDepth === 'deep' ? current().visionDepth : 'standard')
   // 档位提示（注入 bootstrapReminder / followupReminder）：
   // - bootstrapReminder（bootstrap 执行前，visual_kind 未知）：只给档位句
@@ -3086,7 +3189,8 @@ export function apply(ctx, config = {}) {
   // Per-session turn gate: pass 1 is the actual universal structured visual call.
   // The gate opens only after vision_bootstrap has completed that visual request.
   const structuredBootstrapTurnState = new WeakMap()
-  const rewriteEnabled = () => current().rewriteImages !== false
+  const rewriteEnabled = () =>
+    coreVisionFlag('rewriteEnabled', () => current().rewriteImages !== false)
   const downscaleEnabled = () => current().downscale !== false
   const downscaleMaxPixels = () => {
     const value = current().downscaleMaxPixels
@@ -3111,7 +3215,7 @@ export function apply(ctx, config = {}) {
   // The main 1+x structured bootstrap owns the first visual pass.
   // Never stack instantDescribe in front of it (that would silently become 2+x).
   const instantLocalProvider = () =>
-    current().instantDescribe === true && !structuredBootstrapEnabled()
+    instantDescribeEnabled() && !structuredBootstrapEnabled()
       ? localProvidersOf(current())
       : undefined
   const instantLocalStyle = () =>
@@ -3145,7 +3249,7 @@ export function apply(ctx, config = {}) {
   // turn/start event), so tool-side memory and pre-step bindings agree.
   const turnNumberOf = (session) => {
     try {
-      const events = session && session.events
+      const events = getSessionEvents(session)
       if (!Array.isArray(events)) return 0
       const last = events.findLast((event) => event && event.type === 'turn/start')
       return last && Number.isInteger(last.data && last.data.turn) ? last.data.turn : 0
@@ -3410,12 +3514,13 @@ export function apply(ctx, config = {}) {
       (pair) => pair && pair.provider === HTTP_ROUTE && availableHttp.has(pair.model),
     )
     const seen = new Set()
-    return [...native, ...local, ...http].filter((pair) => {
+    const base = [...native, ...local, ...http].filter((pair) => {
       const key = `${pair.provider}/${pair.model}`
       if (seen.has(key)) return false
       seen.add(key)
       return true
     })
+    return applyVisionExecutionOrder(base, currentVisionExecutionOrder())
   }
 
   const routingPairWeight = (pair, entriesById) => {
@@ -4276,7 +4381,7 @@ export function apply(ctx, config = {}) {
         if (capability && capability.attemptable !== false && capability.image) add(provider, model)
       }
     }
-    return out
+    return applyVisionExecutionOrder(out, currentVisionExecutionOrder())
   }
 
   // ── vision chain route: fallback under our own control ─────────────────────
@@ -4672,208 +4777,16 @@ export function apply(ctx, config = {}) {
     }, 'vision-router: proxy fetch')
   }
 
-  const recordUploadedAttachments = (session, attachments) => {
-    visionState.recordAttachments(session, attachments)
-  }
-
-  /**
-   * Index image attachments recorded anywhere in the session event log, not
-   * just in the inbox-claim message stream `agent/pre-step` hands us
-   * (issue #72). Host-produced images (the built-in `read_image` tool's
-   * re-uploads, persisted as `tool/result` events) never enter that stream,
-   * so the harness-announced attachment id stayed unresolvable even though
-   * the UI showed the image and the bytes are durably stored. `session.events`
-   * is the complete append-only log (seeded from storage on resume), so
-   * scanning it — incrementally, per session id — finds every ref with full
-   * metadata for a later `attachments.readImage(ref)`.
-   */
-  const scanSessionEventLog = (session) => {
-    if (!session) return
-    let events
-    try {
-      events = session.events
-    } catch {
-      return // not a host Session (or the getter is unavailable): nothing to scan
-    }
-    if (!Array.isArray(events) || events.length === 0) return
-    const last = visionState.getScannedEventSeq(session)
-    if (last >= events.length) return
-    const refs = collectEventAttachmentRefs(events.slice(last))
-    visionState.setScannedEventSeq(session, events.length)
-    if (refs.length > 0) recordUploadedAttachments(session, refs)
-  }
-
-  const lookupAttachment = (session, id) => {
-    let hit = visionState.lookupAttachment(session, id)
-    if (hit !== undefined) return hit
-    // Cache eviction is a performance event, never a correctness event. First
-    // consume any newly appended log entries; if the requested ref was older
-    // than the bounded working set, perform a target-only recovery from the
-    // durable session log instead of rebuilding an unbounded index.
-    if (session !== undefined) {
-      scanSessionEventLog(session)
-      hit = visionState.lookupAttachment(session, id)
-      if (hit !== undefined) return hit
-      let events
-      try {
-        events = session.events
-      } catch {
-        events = undefined
-      }
-      if (Array.isArray(events) && events.length > 0) {
-        const wanted = String(id)
-        const recovered = collectEventAttachmentRefs(events).find(
-          (ref) => ref && String(ref.attachmentId) === wanted,
-        )
-        if (recovered !== undefined) {
-          visionState.recordAttachments(session, [recovered])
-          return recovered
-        }
-      }
-    }
-    return undefined
-  }
-
-  // ── issue #74: shadow-sanitize tool-result image blocks on the surface ────
-  //
-  // A tool result that renders an image block (vision_present, or the host
-  // read_image on image-capable routes) is persisted as a durable
-  // `tool/result` event and then flows into EVERY later request through
-  // `Session.deriveMessages()`. A text-only adapter (DeepSeek native, pi-ai
-  // text routes) rejects nested images with UNSUPPORTED_CONTENT and the
-  // session is locked forever. The pre-step inbox sanitizer cannot see these
-  // historical events, so the surface itself is rewritten instead: each
-  // offending event is shadowed by a sanitized replacement event
-  // (`surfaceOp: {op:'replace'}`, the same mechanism the host compaction
-  // pruner uses). The Web UI transcript renders append-origin events, so the
-  // user still sees the image; only the model-visible surface is sanitized.
-  // The decision is route-aware: an image-capable route legitimately consumes
-  // read_image's result image, mirroring the host's own gate
-  // (`assertImageCapableRoute` in dsh-tool-fs).
-
-  // session -> { count: nodes examined, done: Set<seqs already decided> }
-  const sessionSurfaceScans = new WeakMap()
-
-  const sessionRouteHandlesImages = async (session) => {
-    let provider
-    let model
-    try {
-      const header = typeof session.requestHeader === 'function' ? session.requestHeader() : undefined
-      provider = header && header.config ? header.config.provider : undefined
-      model = header && header.config ? header.config.model : undefined
-    } catch {
-      return false
-    }
-    if (typeof provider !== 'string' || provider === '' || typeof model !== 'string' || model === '') {
-      return false
-    }
-    // Plugin-owned routes handle image blocks at their stream boundary: the
-    // wrapper and the provider twins rewrite them into markers/descriptions,
-    // the stealth adapter does the same, and the vision-chain route serves
-    // image-capable models.
-    if (provider === wrapperRoute() || provider === chainRoute() || provider.endsWith('-vision')) {
-      return true
-    }
-    if (stealthActive && provider === 'deepseek-official') return true
-    // Routing mode reverse-routes text-only turns back to the text provider;
-    // when neither the wrapper nor the stealth adapter is there to rewrite
-    // images, the reverse target is the bare text adapter, which rejects
-    // tool-result images. Sanitize so text turns stay usable.
-    if (routingEnabled() && reverseRoutingEnabled() && !wrapperRegistered && !stealthActive) {
-      return false
-    }
-    // Same probe the host uses to gate read_image: only routes whose models
-    // declare image input may keep tool-result images.
-    try {
-      const info = await ctx.llm.resolveModelInfo(provider, model)
-      return Array.isArray(info && info.inputModalities) && info.inputModalities.includes('image')
-    } catch {
-      return false // unknown route: fail safe and sanitize
-    }
-  }
-
-  const sanitizeSessionToolResults = async (session) => {
-    if (!session) return
-    let events
-    let nodes
-    try {
-      events = session.events
-      nodes = session.surface && session.surface.nodes
-    } catch {
-      return // not a host Session: nothing to sanitize
-    }
-    if (!Array.isArray(events) || !Array.isArray(nodes) || nodes.length === 0) return
-    let scan = sessionSurfaceScans.get(session)
-    if (!scan) {
-      scan = { count: 0, done: new Set() }
-      sessionSurfaceScans.set(session, scan)
-    }
-    // Compaction replaces the surface wholesale; a shrunk node list means the
-    // positional cursor is stale, so restart from the head. Kept decisions are
-    // memoized in `done`, so a restart is a cheap no-op for examined events.
-    if (nodes.length < scan.count) {
-      scan.count = 0
-      scan.done = new Set()
-    }
-    if (nodes.length === scan.count) return
-    let routeHandlesImages
-    const newSeqs = nodes.slice(scan.count)
-    for (const seq of newSeqs) {
-      const event = events[seq]
-      if (!event || event.type !== 'tool/result' || scan.done.has(seq)) continue
-      const message = event.data && event.data.message
-      if (!message || !Array.isArray(message.content) || !blocksHaveImage(message.content)) {
-        scan.done.add(seq)
-        continue
-      }
-      if (routeHandlesImages === undefined) {
-        routeHandlesImages = await sessionRouteHandlesImages(session)
-      }
-      if (routeHandlesImages) {
-        // Image-capable route: keep the image (read_image's result is the
-        // model's view of the file). The wrapper/twin/stealth routes rewrite
-        // it at stream time anyway.
-        scan.done.add(seq)
-        continue
-      }
-      const sanitized = sanitizeToolResultMessage(message)
-      if (sanitized === message) {
-        scan.done.add(seq)
-        continue
-      }
-      try {
-        session.append(
-          'tool/result',
-          { ...event.data, message: sanitized },
-          {
-            surfaceOp: { op: 'replace', start: seq, end: seq },
-            sourceEventSeqs: [seq],
-          },
-        )
-        scan.done.add(seq)
-        ctx.logger?.info(
-          'vision-router: sanitized a tool-result image block out of the model surface (event seq %s)',
-          seq,
-        )
-      } catch (error) {
-        // A failed shadow leaves the original event on the surface: the
-        // session stays usable (today's behavior) instead of crashing the
-        // pre-step.
-        ctx.logger?.warn(
-          'vision-router: could not sanitize tool-result image at event seq %s (%s)',
-          seq,
-          error && error.message ? error.message : String(error),
-        )
-      }
-    }
-    scan.count += newSeqs.length
-  }
+  const lookupAttachment = (session, id) => sessionVisionIndex.lookupAttachment(session, id)
 
   // session -> { turn, startIndex, hasImage, routed, failures, lastError }
   const turnState = new WeakMap()
 
   ctx.on('agent/pre-step', async (payload, next) => {
-    const decision = await next()
+    let decision = await next()
+    if (sessionVisionRuntime?.index === undefined) {
+      decision = await sessionVisionIndex.prepareDecision(payload, decision)
+    }
     if (decision && decision.kind === 'reject') return decision
     const session = payload.agent && payload.agent.session
     if (!session) return decision
@@ -4897,42 +4810,26 @@ export function apply(ctx, config = {}) {
       if (hasImage) {
         ctx.logger.info(
           'vision-router: image turn — instantDescribe=%s localBackends=%s',
-          current().instantDescribe === true ? 'on' : 'off',
+          instantDescribeEnabled() ? 'on' : 'off',
           localProvidersOf(current())
             .map((p) => p.name)
             .join(',') || 'none',
         )
       }
     }
-    // Record every raw image reference before nested tool-result images are
-    // sanitized. This preserves attachment lookup for a later vision_describe.
-    const rawImageRefs = rewriteImageBlocks(rawMessages)
-    recordUploadedAttachments(session, rawImageRefs.attachments)
-    // Also index image attachments that live only in the session event log
-    // (read_image re-uploads never cross the inbox-claim message stream).
-    // Incremental: scans only new events (issue #72).
-    scanSessionEventLog(session)
     // Hard invariant: tool-produced image blocks never reach a model request.
-    // Two layers: (1) sanitize tool-result images in the inbox claim, and
-    // (2) shadow-sanitize historical tool/result events on the session
-    // surface (issue #74) — the only lever that can rewrite durable history.
+    // SessionVisionIndex owns durable-log indexing and historical surface
+    // repair; Core retains only the current inbox sanitizer.
     const sanitizedToolResults = sanitizeToolResultImages(rawMessages)
     const messages = sanitizedToolResults.messages
     const hasImage = messages.some((message) => blocksHaveImage(message && message.content))
-    try {
-      await sanitizeSessionToolResults(session)
-    } catch (error) {
-      ctx.logger?.warn(
-        'vision-router: session-surface sanitization failed (%s)',
-        error && error.message ? error.message : String(error),
-      )
-    }
+
     // Register the turn state BEFORE the image-turn branches below: those
     // branches return early (auto-mount reminder, history rewrite), and the
     // agent/request hook must still see the state, otherwise an image turn is
     // served by the text provider and rejected (issue #74, second root cause).
     if (routingEnabled()) {
-      const events = session.events ?? []
+      const events = getSessionEvents(session) ?? []
       turnState.set(session, {
         turn: payload.turn,
         startIndex: events.length,
@@ -5025,7 +4922,7 @@ export function apply(ctx, config = {}) {
       // 都先尝试本地识别并把结果写入 imageMemory：后续 rewriteHistoryImages
       // / wrapper 改写时缓存命中，模型第一轮即"看懂"。失败（无本地后端 /
       // 连接失败 / 超时）静默回退原有标记，绝不阻塞图片轮。
-      if (rewriteEnabled() && !routingEnabled() && current().instantDescribe === true) {
+      if (rewriteEnabled() && !routingEnabled() && instantDescribeEnabled()) {
         const localProviders = instantLocalProvider()
         if (localProviders !== undefined && localProviders.length > 0) {
           try {
@@ -5052,7 +4949,7 @@ export function apply(ctx, config = {}) {
       }
       // Auto-mount the deep vision tools on image turns: the model can use
       // them from its very first step without the user asking for them.
-      if (toolEnabled() && current().autoActivateOnImage !== false) {
+      if (toolEnabled() && autoActivateOnImageEnabled()) {
         const outcome = activateDeepTools()
         if (!autoMountNotified && outcome.includes('已挂载')) {
           autoMountNotified = true
@@ -5146,7 +5043,7 @@ export function apply(ctx, config = {}) {
     const state = turnState.get(session)
     if (!state || state.turn !== payload.turn) return config0
     if (!state.hasImage) {
-    const events = session.events ?? []
+    const events = getSessionEvents(session) ?? []
     for (let i = state.startIndex; i < events.length; i++) {
       if (eventHasImage(events[i])) {
         state.hasImage = true
@@ -7232,30 +7129,8 @@ ctx.logger?.info(
                         : 'call vision_bootstrap and wait for its universal structured visual result before any other vision tool',
                     })
                   }
-                  // 档位深度上限：fast/deep 硬拦、standard 不拦（现状行为）。
-                  // bootstrap 那 1 遍不计入；只数 evidence 深挖工具（structuredFollowupEvidenceTools）。
-                  if (
-                    structuredBootstrapEnabled() &&
-                    state &&
-                    state.required &&
-                    state.completed === true &&
-                    def.name !== 'vision_bootstrap' &&
-                    structuredFollowupEvidenceTools.has(def.name)
-                  ) {
-                    const limit = depthLimitFor(visionDepth())
-                    const used = state.deepCalls || 0
-                    if (limit !== undefined && used >= limit) {
-                      return JSON.stringify({
-                        ok: false,
-                        code: 'VISION_DEPTH_LIMIT',
-                        retryable: false,
-                        reason: `本轮深度档位为 ${visionDepth()}，深挖调用已达上限 ${limit} 次；请基于已有证据作答`,
-                      })
-                    }
-                    // 配额不在调用前预扣：失败调用（ok:false）不烧掉档位的
-                    // 深挖配额——模型保有"至少一次证据调用"提醒并可重试。
-                    // 计数移到 execute 成功后（仅产出证据才 +1）。
-                  }
+                  // 识图档位不在这里做调用次数拦截；显式 visionDepthMaxCalls 由
+                  // structured-flow hardening 统一执行，避免与 evidence 完成状态重复计数。
                   let effectiveArgs = args
                   if (
                     structuredBootstrapEnabled() &&
@@ -7297,7 +7172,6 @@ ctx.logger?.info(
                       }
                     }
                     if (!evidenceFailure) {
-                      state.deepCalls = (state.deepCalls || 0) + 1
                       state.followupCompleted = true
                     }
                   }

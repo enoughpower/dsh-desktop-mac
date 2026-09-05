@@ -5,6 +5,7 @@ export const POCKET_ENDPOINTS = Object.freeze({
   status: 'pocket.status',
   tunnelStart: 'tunnel.start',
   tunnelStop: 'tunnel.stop',
+  tunnelSetConfig: 'tunnel.setConfig',
   version: 'pocket.version',
   update: 'pocket.update',
   restart: 'pocket.restart',
@@ -13,6 +14,10 @@ export const POCKET_ENDPOINTS = Object.freeze({
   lanSetOverride: 'lan.setOverride',
   lanSetEnabled: 'lan.setEnabled',
   pinSetCustom: 'pin.setCustom',
+  pocketReset: 'pocket.reset',
+  // 移动端「复制文件内容」（issue #17）：手机经此 RPC 让主机读取文件正文，
+  // 再写入剪贴板——因为手机无法直接打开电脑上的文件。
+  fileRead: 'pocket.fileRead',
 });
 
 /** 语义化版本比较：a > b 返回正数，相等 0，a < b 负数（数字段 + 预发布后缀）。 */
@@ -62,6 +67,7 @@ export function redactStatus(s) {
     tunnelUrl: s?.tunnelUrl ?? null,
     tunnelQr: s?.tunnelQr ?? null,
     tunnelState: s?.tunnelState ?? { phase: 'idle' },
+    tunnelConfig: s?.tunnelConfig ?? { mode: 'quick', hostname: '', tokenSet: false },
     dshPort: s?.dshPort ?? null,
   };
 }

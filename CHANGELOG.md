@@ -81,4 +81,13 @@
   引入的第三方依赖（如 dsh-app-boot 的 `resolve.exports`）不会安装，后端启动即报
   `ERR_MODULE_NOT_FOUND: Cannot find package` 退出、应用打不开。更新器现会在替换
   `@deepseek-ai/*` 的同时自动补装缺失的第三方依赖，更新后应用仍可正常启动。
+- **升级内置插件**：
+  - dsh-vision-router 1.7.6 → 2.1.2（附件产品契约升级为 `batch-attachments`；同步放宽
+    宿主附件归一化预算 `normalizedImageMaxBytes/Pixels/Dimension` = 20 MiB / 1 亿像素 /
+    10000 px，与既有存储准入一致，保证 crop/grounding/OCR/pixel-diff 像素坐标系不变）。
+  - dsh-cost-meter 1.5.38 → 1.7.10（依赖对齐 dsh rc.8 线：zod 4.5.1、
+    dsh-credentials/dsh-home-paths 0.1.0-rc.8）。
+  - dsh-pocket 1.14.5 → 2.10.3。
+  - README（中/英）同步插件版本号。
+
 

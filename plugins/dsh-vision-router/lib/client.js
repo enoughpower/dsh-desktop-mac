@@ -1,6 +1,5 @@
-// dsh-vision-router browser half: a first-class 设置 > Vision Router page plus
-// the legacy 设置 > 插件 configuration card, both editing the same host-owned
-// `vision-router` settings namespace. Self-contained
+// dsh-vision-router browser half: one first-class Settings > Vision Router page
+// backed by the host-owned `vision-router` settings namespace. Self-contained
 // by hand (no bundler in this repo): the client module system wraps it in a
 // CJS factory and the kernel adopts { apply, inject } as a client plugin.
 window.__ModuleLoader__.load({
@@ -56,9 +55,6 @@ window.__ModuleLoader__.load({
       remoteSettingsProxyBody: '远程设置路由返回 404。若使用 Nginx/Caddy/其他反向代理，请同时转发 /vision-router-settings/* 到 DSH。',
       remoteSafeScopeHint: '远程页面只允许修改低风险偏好；网络、凭据、本地后端、产物目录、桌面截图和宿主路由等设置只能在 DSH 本机修改。',
       settingsConflict: '设置已被另一端修改。已刷新最新配置，请确认你的修改后重新保存。',
-      legacyMovedTitle: 'Vision Router 设置已迁移',
-      legacyMovedBody: '主设置入口现在位于「设置 → Vision Router」。此处仅保留兼容入口，不再维护第二份可编辑表单。',
-      legacyOpen: '打开 Vision Router 设置',
       overridden: '已覆盖',
       reset: '恢复默认',
       toggleInstantDescribe: '即时本地识图',
@@ -255,13 +251,14 @@ window.__ModuleLoader__.load({
       guidanceOverridePlaceholder: '输入自定义引导语（留空 = 使用内置）',
       addGuidanceOverride: '+ 添加一条自定义引导',
       selectKind: '选择图片类型…',
-      visionDepthFast: '快速（最多再细看 1 次）',
-      visionDepthStandard: '标准（细看 1-2 次，默认）',
-      visionDepthDeep: '细致（细看 2-4 次）',
-      visionDepthCustom: '自定义（自己填次数上限）',
-      hintVisionDepth: '选择看图时的精细度：快速最省（最多再细看 1 次）、标准为默认（细看 1-2 次）、细致看得最细（细看 2-4 次）。档位只限制「再细看几次」，具体看什么由模型按你的问题决定。',
-      labelVisionDepthMaxCalls: '自定义深挖次数上限',
-      hintVisionDepthMaxCalls: '选择「自定义」后填写次数上限（1-100）；留空或填 0 = 不限制深挖次数（视同标准档）。bootstrap 预识别那遍不计入，失败的调用也不占次数。',
+      visionDepthFast: '快速（优先整体判断）',
+      visionDepthStandard: '标准（按需查证，默认）',
+      visionDepthDeep: '细致（主动交叉验证）',
+      hintVisionDepth: '看图深度只决定识图策略，不限制调用次数：快速优先整体判断，标准按问题需要查证，细致会主动做更多局部检查与交叉验证。如需限制调用次数，请启用下方「限制深挖次数」。',
+      depthCapTitle: '限制深挖次数',
+      depthCapHint: '默认关闭，不限制视觉证据调用次数。启用后可设置本轮最多允许多少次成功的深挖证据调用；bootstrap 预识别不计入，失败或空证据调用不占次数。',
+      depthCapValueLabel: '最多深挖次数',
+      depthCapInvalid: '请输入 1–100 之间的整数。',
       numHintTimeoutMs: '单个视觉请求超时；默认 120000。',
       numHintVisionTaskTimeoutMs: '一次识图任务（含全部 provider、回退与重试）共享的总时限；默认 45000。认证失败/限流会立即熔断对应后端。',
       numHintOcrTimeoutMs: '一次 OCR 任务的总时限；本地 tesseract 最多用 12 秒，视觉模型回退只用剩余部分；默认 30000。',
@@ -332,9 +329,6 @@ window.__ModuleLoader__.load({
       remoteSettingsProxyBody: 'The remote-settings route returned 404. If DSH is behind Nginx, Caddy, or another reverse proxy, also forward /vision-router-settings/* to DSH.',
       remoteSafeScopeHint: 'Remote pages can change low-risk preferences only. Network, credentials, local backends, artifact paths, desktop capture, and host routing remain loopback-only.',
       settingsConflict: 'Settings changed on another client. The latest values were refreshed; review your draft and save again.',
-      legacyMovedTitle: 'Vision Router settings moved',
-      legacyMovedBody: 'The canonical editor is now Settings → Vision Router. This compatibility entry no longer keeps a second editable form.',
-      legacyOpen: 'Open Vision Router settings',
       overridden: 'Overridden',
       reset: 'Reset',
       toggleInstantDescribe: 'Instant local image recognition',
@@ -534,13 +528,14 @@ window.__ModuleLoader__.load({
       guidanceOverridePlaceholder: 'Enter custom guidance (empty = built-in)',
       addGuidanceOverride: '+ Add a custom guidance line',
       selectKind: 'Select image type…',
-      visionDepthFast: 'Quick (at most 1 more look)',
-      visionDepthStandard: 'Standard (1-2 looks, default)',
-      visionDepthDeep: 'Thorough (2-4 looks)',
-      visionDepthCustom: 'Custom (set your own cap)',
-      hintVisionDepth: 'How thoroughly to look after the structured pre-scan: Quick is cheapest (at most 1 more look), Standard is the default (1-2 looks), Thorough looks the closest (2-4 looks). The tier only caps how many extra looks are allowed; what the model looks for is driven by your question.',
-      labelVisionDepthMaxCalls: 'Custom deep-dive call cap',
-      hintVisionDepthMaxCalls: 'Pick "Custom" first, then enter a cap (1-100). Empty or 0 = no cap (same as Standard). The bootstrap pre-scan does not count, and failed calls do not consume the quota.',
+      visionDepthFast: 'Quick (overall-first)',
+      visionDepthStandard: 'Standard (evidence as needed, default)',
+      visionDepthDeep: 'Thorough (proactive cross-checking)',
+      hintVisionDepth: 'Vision depth chooses the inspection strategy, not a call-count limit: Quick stays overall-first, Standard verifies evidence as needed, and Thorough proactively inspects details and cross-checks important claims. To cap calls, enable “Limit deep-dive calls” below.',
+      depthCapTitle: 'Limit deep-dive calls',
+      depthCapHint: 'Off by default, so visual evidence calls are unlimited. Enable this to cap successful deep-evidence calls for the turn. The bootstrap pre-scan does not count, and failed or empty-evidence calls do not consume the cap.',
+      depthCapValueLabel: 'Maximum deep-dive calls',
+      depthCapInvalid: 'Enter an integer from 1 to 100.',
       numHintTimeoutMs: 'Per vision-call deadline; default 120000.',
       numHintVisionTaskTimeoutMs: 'One vision task (all providers, fallbacks and retries) shares this wall-clock budget; default 45000. Auth failures and rate limits trip their backend immediately.',
       numHintOcrTimeoutMs: 'Total budget for one OCR task: tesseract gets at most 12s, the vision fallback only the remainder; default 30000.',
@@ -1196,11 +1191,13 @@ window.__ModuleLoader__.load({
       if (provider === '' || model === '') return undefined
       return { provider, model }
     }
-    function parseNumber(text, min) {
+    function parseNumber(text, min, max) {
       const trimmed = String(text ?? '').trim()
       if (trimmed === '') return { clear: true }
       const parsed = Number(trimmed)
-      return Number.isInteger(parsed) && parsed >= min ? { value: parsed } : undefined
+      return Number.isInteger(parsed) && parsed >= min && (max === undefined || parsed <= max)
+        ? { value: parsed }
+        : undefined
     }
 
     // ── styles: mirrors the built-in plugin cards (same design tokens) ──────
@@ -1768,8 +1765,7 @@ window.__ModuleLoader__.load({
       return list.find(guideElementUsable)
     }
     // The walkthrough has one canonical destination: the first-class
-    // Vision Router settings section. The legacy plugin card remains mounted
-    // for compatibility, but onboarding never teaches two competing paths.
+    // Vision Router settings section registered below.
     function guideVisionRouterNav() {
       const panel = guideSettingsPanel()
       if (!panel) return undefined
@@ -2758,7 +2754,8 @@ window.__ModuleLoader__.load({
         }
         if (key === 'localDescribeStyle') return value === 'structured' ? 'structured' : 'plain'
         if (SELECT_KEYS.includes(key)) {
-          return value === 'fast' || value === 'standard' || value === 'deep' || value === 'custom' ? value : 'standard'
+          if (value === 'custom') return 'standard'
+          return value === 'fast' || value === 'standard' || value === 'deep' ? value : 'standard'
         }
         return typeof value === 'string' ? value : ''
       }
@@ -2785,7 +2782,9 @@ window.__ModuleLoader__.load({
           const value = parseTextProvider(text)
           return value === undefined ? undefined : { value }
         }
-        if (NUMBER_KEYS.includes(key) || DEPTH_NUMBER_KEYS.includes(key)) return parseNumber(text, NUMBER_META[key].min)
+        if (NUMBER_KEYS.includes(key) || DEPTH_NUMBER_KEYS.includes(key)) {
+          return parseNumber(text, NUMBER_META[key].min, NUMBER_META[key].max)
+        }
         if (key === 'guidanceOverrides') {
           const rows = Array.isArray(text) ? text : []
           const cleaned = []
@@ -2815,7 +2814,7 @@ window.__ModuleLoader__.load({
           return text === 'structured' || text === 'plain' ? { value: text } : undefined
         }
         if (SELECT_KEYS.includes(key)) {
-          return text === 'fast' || text === 'standard' || text === 'deep' || text === 'custom' ? { value: text } : undefined
+          return text === 'fast' || text === 'standard' || text === 'deep' ? { value: text } : undefined
         }
         if (key === 'proxyHosts') {
           const list = String(text ?? '')
@@ -3136,6 +3135,7 @@ window.__ModuleLoader__.load({
           ),
           h('select', {
             className: 'vr-input vr-select' + (invalidField ? ' vr-input-invalid' : ''),
+            'data-vr-depth-strategy': key === 'visionDepth' ? '1' : undefined,
             value: format(key), disabled: editBlocked,
             onChange: (event) => setDraft(key, event.target.value),
           },
@@ -3148,6 +3148,44 @@ window.__ModuleLoader__.load({
               : null,
         )
       }
+      const depthCapField = () => {
+        const key = 'visionDepthMaxCalls'
+        const raw = format(key)
+        const parsed = Number(raw)
+        const enabled = Number.isInteger(parsed) && parsed > 0
+        const invalidField = key in drafts && parse(key, drafts[key]) === undefined
+        const savedRaw = Number(readValue(snapshot, key))
+        const savedCap = Number.isInteger(savedRaw) && savedRaw >= 1 && savedRaw <= 100 ? savedRaw : 4
+        return h('div', { className: 'vr-field', key, 'data-vr-depth-cap': '1' },
+          h('div', { className: 'vr-field-head' },
+            h('div', { className: 'vr-toggle' },
+              h('span', { className: 'vr-label' }, t('depthCapTitle')),
+              h('input', {
+                type: 'checkbox', className: 'vr-check', checked: enabled,
+                'data-vr-depth-cap-toggle': '1', disabled: editBlocked,
+                onChange: (event) => setDraft(key, event.target.checked ? String(savedCap) : '0'),
+              }),
+            ),
+            overriddenBadge(key),
+          ),
+          h('p', { className: 'vr-hint' }, t('depthCapHint')),
+          enabled
+            ? h('div', { className: 'vr-local-row' },
+                h('label', { className: 'vr-label vr-local-label' }, t('depthCapValueLabel')),
+                h('input', {
+                  className: 'vr-input' + (invalidField ? ' vr-input-invalid' : ''),
+                  type: 'number', min: 1, max: 100, step: 1, value: raw,
+                  'data-vr-depth-cap-value': '1', disabled: editBlocked,
+                  onChange: (event) => setDraft(key, event.target.value),
+                }),
+                invalidField
+                  ? h('p', { className: 'vr-invalid' }, t('depthCapInvalid'))
+                  : null,
+              )
+            : null,
+        )
+      }
+
       // 自定义识图引导编辑器：每行 [图片类型 select] [引导语 input] [移除]，+ 添加。
       const GUIDANCE_KIND_OPTIONS = [
         { value: 'code', label: 'code（代码）' },
@@ -3948,14 +3986,11 @@ window.__ModuleLoader__.load({
                       { value: 'fast', label: t('visionDepthFast') },
                       { value: 'standard', label: t('visionDepthStandard') },
                       { value: 'deep', label: t('visionDepthDeep') },
-                      { value: 'custom', label: t('visionDepthCustom') },
                     ])),
-                    format('visionDepth') === 'custom'
-                      ? DEPTH_NUMBER_KEYS.map((key) => textField(key, t(LABEL_KEY[key]), t(HINT_KEY[key]), false))
-                      : null,
                     guidanceOverridesEditor(),
                   )
                 : null,
+              depthCapField(),
               // Local vision is a primary capability. Keep the heavy editors
               // collapsed by default, but make the entry obvious at a glance.
               !remoteMode ? h('div', {
@@ -4214,23 +4249,6 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function VisionRouterLegacyEntry(props) {
-      const t = props.t
-      const h = React.createElement
-      return h('li', { className: 'vr-card vr-card-open' },
-        h('div', { className: 'vr-body' },
-          h('div', { className: 'vr-quickstart' },
-            h('div', { className: 'vr-quickstart-title' }, t('legacyMovedTitle')),
-            h('p', { className: 'vr-quickstart-body' }, t('legacyMovedBody')),
-            h('button', {
-              type: 'button', className: 'vr-btn vr-btn-save',
-              onClick: () => { guideHostUi.openVisionRouter() },
-            }, t('legacyOpen')),
-          ),
-        ),
-      )
-    }
-
     function apply(ctx) {
       const localScope = ctx.settingsScope.bind({ namespace: 'vision-router' })
       const presentedImageUrls = new Map()
@@ -4365,11 +4383,9 @@ window.__ModuleLoader__.load({
       // this identity stays fixed across slot renders.
       const subscribeConnectionReset = (listener) => ctx.on('connection/reset', listener)
       const cardInject = { getConnection, t, locale: ctx.locale, remote: ctx.remote, subscribeConnectionReset }
-      // One form implementation, two presentation surfaces. Only the primary
-      // section switches to the opt-in remote scope on a non-loopback client;
-      // the legacy plugin card remains a compatibility shell over DSH's local scope.
+      // Vision Router owns one canonical settings surface. The section switches
+      // to the opt-in remote scope on a non-loopback client.
       const sectionCardInject = Object.freeze({ ...cardInject, scope: primaryScope, surface: 'section' })
-      const legacyEntryInject = Object.freeze({ t })
       const VisionRouterSettingsSection = (sectionProps) =>
         React.createElement(
           'ul',
@@ -4391,23 +4407,6 @@ window.__ModuleLoader__.load({
             )
           }),
         'vision-router: primary settings section',
-      )
-      ctx.effect(
-        () =>
-          ctx.slots.inject('settings.plugin.item', function* () {
-            yield ctx.slots.register(
-              {
-                name: 'settings.plugin.item',
-                key: 'vision-router',
-                id: 'vision-router',
-                order: 30,
-                label: () => t('nav'),
-                inject: () => legacyEntryInject,
-              },
-              VisionRouterLegacyEntry,
-            )
-          }),
-        'vision-router: legacy plugin settings card',
       )
       ctx.effect(
         () =>

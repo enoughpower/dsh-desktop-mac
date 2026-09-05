@@ -7,7 +7,7 @@
 // 注：Web Push 已移除——浏览器推送依赖 Google FCM（Chrome）等境外服务，
 // 国内直连被墙，普通用户用不了。专注扫码同屏这一件事。
 
-import { createElement as h, useEffect, useState } from 'react';
+import { createElement as h, useEffect, useRef, useState } from 'react';
 
 import { POCKET_RPC_CHANNEL, POCKET_ENDPOINTS, redactStatus, compareVersions } from './api.js';
 import { mobileApply } from './mobile/mobile-apply.tsx';
@@ -165,10 +165,17 @@ function PocketSettingsTab({ rpcCall, t }) {
 
   // 安全免责声明（issue #31）：每次开启公网都必须先弹框勾选「我已知情」。
   // 服务端同样强制（tunnel.start 需 disclaimer: true），防绕过前端直接调 RPC。
+
   const [disclaimerOpen, setDisclaimerOpen] = useState(false);
   const [disclaimerChecked, setDisclaimerChecked] = useState(false);
 
   const doStartTunnel = async () => {
+    // 命名隧道模式：Token/域名没配齐就不发起（服务端同样会拒绝）
+    const cfg = status?.tunnelConfig;
+    if (cfg?.mode === 'named' && (!cfg.hostname || !cfg.tokenSet)) {
+      setError(t('namedNeedCfg'));
+      return;
+    }
     setBusy(true);
     setError(null);
     setTunnelState({ phase: 'starting', detail: '正在开启…', startedAt: Date.now() });
@@ -193,6 +200,45 @@ function PocketSettingsTab({ rpcCall, t }) {
 
   const stopTunnel = async () => {
     try { setStatus(await call(POCKET_ENDPOINTS.tunnelStop, {})); } catch { /* 忽略 */ }
+  };
+
+  // 公网模式（issue #66）：随机域名（默认零配置）/ 固定域名（Cloudflare 命名隧道 + Tunnel Token）
+  // tunnelCfg：编辑态 { hostname, token, err } | null；token 输入留空 = 保持已存的 Token 不变
+  const [tunnelCfg, setTunnelCfg] = useState(null);
+  const switchToQuick = async () => {
+    try { setStatus(await call(POCKET_ENDPOINTS.tunnelSetConfig, { mode: 'quick' })); } catch (err) { setError(err.message); }
+  };
+  const saveNamedTunnel = async () => {
+    try {
+      setStatus(await call(POCKET_ENDPOINTS.tunnelSetConfig, {
+        mode: 'named',
+        hostname: tunnelCfg?.hostname ?? '',
+        token: tunnelCfg?.token || undefined, // 留空不覆盖已存 Token
+      }));
+      setTunnelCfg(null);
+    } catch (err) {
+      setTunnelCfg((c) => ({ ...c, err: err.message }));
+    }
+  };
+
+  // 恢复出厂设置：清本机设置 + 重设随机密码（弹窗确认；RPC 端也强制校验 confirm）
+  const [resetOpen, setResetOpen] = useState(false);
+  const doFactoryReset = async () => {
+    setResetOpen(false);
+    setBusy(true);
+    setError(null);
+    try {
+      setStatus(await call(POCKET_ENDPOINTS.pocketReset, { confirm: true }));
+      setTunnelCfg(null);
+      setCustomPin(null);
+      setAdvOpen(false);
+      showToast(t('resetDone'));
+    } catch (err) {
+      setError(err.message);
+      showToast(t('resetFailed'));
+    } finally {
+      setBusy(false);
+    }
   };
 
   // 刷新局域网访问密码（旧密码立即作废）
@@ -236,7 +282,7 @@ function PocketSettingsTab({ rpcCall, t }) {
     }
   };
 
-  // 自定义访问密码（issue #33）：公网/局域网各自设固定 8 位数字；自定义后公网不再自动轮换。
+  // 自定义访问密码（issue #33）：公网/局域网各自设固定 8 位密码（英文字母大小写或数字）；自定义后公网不再自动轮换。
   // customPin: { which: 'public'|'lan', value, err } | null —— 正在输入自定义密码的区块
   const [customPin, setCustomPin] = useState(null);
   const saveCustomPin = async (which) => {
@@ -258,18 +304,17 @@ function PocketSettingsTab({ rpcCall, t }) {
   const customPinRow = (which) => h('div', { style: { marginTop: 6, fontSize: 12, color: 'var(--dsw-alias-label-secondary,#6b7280)', lineHeight: 1.5 } },
     t('customizing'),
     h('input', {
-      style: { width: 110, margin: '0 6px', padding: '4px 8px', fontSize: 14, letterSpacing: 2, textAlign: 'center', border: '1px solid var(--dsw-alias-border-l2,#d1d5db)', borderRadius: 6, outline: 'none' },
+      style: { width: 130, margin: '0 6px', padding: '4px 8px', fontSize: 14, letterSpacing: 1, textAlign: 'center', border: '1px solid var(--dsw-alias-border-l2,#d1d5db)', borderRadius: 6, outline: 'none' },
       type: 'password',
-      inputMode: 'numeric',
       maxLength: 8,
       value: customPin?.value ?? '',
       autoFocus: true,
-      onChange: (e) => setCustomPin((c) => ({ ...c, value: e.target.value.replace(/\D/g, ''), err: null })),
+      onChange: (e) => setCustomPin((c) => ({ ...c, value: e.target.value.replace(/[^a-zA-Z0-9]/g, ''), err: null })),
       onKeyDown: (e) => { if (e.key === 'Enter') saveCustomPin(which); if (e.key === 'Escape') setCustomPin(null); },
     }),
     h('button', { style: { ...styles.btn, height: 26, padding: '0 10px', fontSize: 12, marginLeft: 2 }, onClick: () => saveCustomPin(which) }, t('save')),
     h('button', { style: { ...styles.btn, height: 26, padding: '0 10px', fontSize: 12 }, onClick: () => setCustomPin(null) }, t('cancel')),
-    customPin?.err ? h('div', { style: { color: 'var(--dsw-alias-state-error-primary,#dc2626)', marginTop: 4 } }, customPin.err) : null,
+    customPin?.err ? h('div', { style: { color: 'var(--dsw-alias-state-error-primary,#dc2626)', marginTop: 4 } }, errText(customPin.err)) : null,
   );
   // 「自定义」按钮（非输入态显示在密码行末尾）
   const customBtn = (which) => h('button', { style: { ...styles.btn, height: 26, padding: '0 10px', fontSize: 12, marginLeft: 8 }, onClick: () => setCustomPin({ which, value: '', err: null }) }, t('customize'));
@@ -280,6 +325,50 @@ function PocketSettingsTab({ rpcCall, t }) {
   const tunnelStarting = ['downloading', 'starting', 'registering'].includes(tunnelPhase);
   const tunnelStateDetail = tunnelState?.detail ?? '';
   const tunnelStateStarted = tunnelState?.startedAt ?? null;
+  // 公网模式视图（issue #66）：{ mode, hostname, tokenSet }
+  const tunnelModeView = status?.tunnelConfig ?? { mode: 'quick', hostname: '', tokenSet: false };
+  const namedMode = tunnelModeView.mode === 'named';
+  // 模式按钮选中态高亮：固定域名模式本身，或正在编辑固定域名配置，都视为「选中」
+  const namedActive = namedMode || tunnelCfg !== null;
+  // 后端错误消息统一为「中文 | English」混排；按当前界面语言只显示对应一半
+  const errText = (msg) => {
+    const s = String(msg ?? '');
+    const i = s.indexOf(' | ');
+    if (i < 0) return s;
+    return (t('ok') === POCKET_ZH.ok ? s.slice(0, i) : s.slice(i + 3)).trim();
+  };
+  // 轻量 Toast：操作成功/失败后短暂提示（自动消失，不打断操作）
+  const [toast, setToast] = useState(null);
+  const toastTimer = useRef(null);
+  const showToast = (text) => {
+    setToast(text);
+    clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(null), 2600);
+  };
+  useEffect(() => () => clearTimeout(toastTimer.current), []);
+  const modeBtnStyle = (active) => ({
+    ...styles.btn, height: 28, padding: '0 12px', fontSize: 12,
+    fontWeight: active ? 600 : 400,
+    background: active ? 'var(--dsw-alias-button-primary-fill, var(--dsw-alias-brand-primary,#4f6ef7))' : 'var(--dsw-alias-bg-layer-1,#fff)',
+    color: active ? 'var(--dsw-alias-label-primary-foreground, #fff)' : 'var(--dsw-alias-label-primary,inherit)',
+  });
+  // iOS 风格小开关（重排后统一用：局域网总开关 / 局域网密码开关）
+  const Switch = (on, onClick) => h('button', {
+    role: 'switch', 'aria-checked': !!on,
+    style: { flexShrink: 0, width: 40, height: 22, borderRadius: 11, border: 'none', padding: 0, position: 'relative', cursor: 'pointer', font: 'inherit', background: on ? 'var(--dsw-alias-button-primary-fill, var(--dsw-alias-brand-primary,#4f6ef7))' : 'var(--dsw-alias-border-l2,#d1d5db)' },
+    onClick,
+  }, h('span', { style: { position: 'absolute', top: 2, left: on ? 20 : 2, width: 18, height: 18, borderRadius: '50%', background: '#fff' } }));
+  // 卡片内主内容：二维码 + 地址 + 提示
+  const qrArea = (src, url, hint) => h('div', { style: { background: 'var(--dsw-alias-bg-layer-2,#f3f4f6)', borderRadius: 10, padding: '10px 12px', textAlign: 'center', margin: '10px 0' } },
+    h('img', { src, alt: 'QR', style: styles.qr }),
+    h('div', { style: styles.code }, url),
+    h('div', { style: styles.muted }, hint));
+  // 设置行：上分隔线，内部第一行 = 左标签 + 右操作；extra 作为第二段渲染
+  const row = (label, control, extra) => h('div', { style: { borderTop: '1px solid var(--dsw-alias-border-l2,#e5e7eb)', paddingTop: 9, marginTop: 9 } },
+    h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 } },
+      h('span', { style: { fontSize: 13 } }, label), control), extra ?? null);
+  // 高级（手动选地址）展开态
+  const [advOpen, setAdvOpen] = useState(false);
 
   return h('div', { style: styles.card },
     h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 } },
@@ -330,104 +419,169 @@ function PocketSettingsTab({ rpcCall, t }) {
         : updateInfo.result === 'ok'
           ? (updateInfo.autoRestart ? t('updatedAutoDetail')
             : t('updatedRestartDetail'))
-        : updateInfo.result === 'fail' ? fmt(t, 'updateFailed', { err: updateInfo.output || t('unknownError') })
+        : updateInfo.result === 'fail' ? fmt(t, 'updateFailed', { err: errText(updateInfo.output) || t('unknownError') })
         : fmt(t, 'versionRange', { cur: updateInfo.current, latest: updateInfo.latest })),
     ) : null,
 
-    // 局域网
+    // 局域网：标题行自带总开关 → 二维码+地址 → 设置行（访问密码 / 高级·手动选地址）
     h('div', { style: styles.block },
-      h('div', { style: { fontWeight: 600, fontSize: 13 } }, t('lanTitle')),
-      // 局域网访问总开关：关闭后扫码/链接直接失效（公网不受影响）
-      h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 } },
-        h('span', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary,#6b7280)' } }, t('lanAccess')),
-        h('button', {
-          style: { ...styles.btn, height: 28, padding: '0 12px', fontSize: 12, fontWeight: status?.lanEnabled !== false ? 600 : 400, background: status?.lanEnabled !== false ? 'var(--dsw-alias-button-primary-fill, var(--dsw-alias-brand-primary,#4f6ef7))' : 'var(--dsw-alias-bg-layer-1,#fff)', color: status?.lanEnabled !== false ? 'var(--dsw-alias-label-primary-foreground, #fff)' : 'var(--dsw-alias-label-primary,inherit)' },
-          onClick: () => requestLanToggle(true),
-        }, t('on')),
-        h('button', {
-          style: { ...styles.btn, height: 28, padding: '0 12px', fontSize: 12, fontWeight: status?.lanEnabled === false ? 600 : 400, background: status?.lanEnabled === false ? 'var(--dsw-alias-state-error-primary,#dc2626)' : 'var(--dsw-alias-bg-layer-1,#fff)', color: status?.lanEnabled === false ? '#fff' : 'var(--dsw-alias-label-primary,inherit)' },
-          onClick: () => requestLanToggle(false),
-        }, t('off')),
+      h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between' } },
+        h('span', { style: { fontWeight: 600, fontSize: 13 } }, t('lanAccess')),
+        Switch(status?.lanEnabled !== false, () => requestLanToggle(status?.lanEnabled === false)),
       ),
       status?.lanEnabled === false
         ? h('div', { style: { marginTop: 8, fontSize: 12, color: 'var(--dsw-alias-state-warn-primary,#b45309)', lineHeight: 1.5 } }, t('lanDisabledHint'))
         : (lanUrl
           ? h('div', null,
-          h('img', { src: status.lanQr, alt: 'LAN QR', style: styles.qr }),
-          h('div', { style: styles.code }, lanUrl),
-          h('div', { style: styles.muted }, t('lanHint')),
-          h('label', { style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 10, fontSize: 12, color: 'var(--dsw-alias-label-secondary,#6b7280)' } },
-            t('lanAddress'),
-            h('select', {
-              value: status?.lanIpOverride || '',
-              onChange: (e) => setLanAddress(e.target.value),
-              style: { font: 'inherit', height: 30, padding: '0 8px', borderRadius: 8, border: '1px solid var(--dsw-alias-border-l2,#d1d5db)', background: 'var(--dsw-alias-bg-layer-1,#fff)', color: 'var(--dsw-alias-label-primary,inherit)' },
-            },
-            h('option', { value: '' }, t('lanAddressAuto')),
-            (status?.lanCandidates || []).map((ip) => h('option', { key: ip, value: ip }, ip)),
-            ),
-          ),
-          h('div', { style: { ...styles.muted, marginTop: 2 } }, t('lanAddressHint')),
-          // 访问密码开关（issue #24）：默认开启；关闭后扫码直连（仅同一局域网设备可访问）
-          h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 } },
-            h('span', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary,#6b7280)' } }, t('lanPin')),
-            h('button', {
-              style: { ...styles.btn, height: 28, padding: '0 12px', fontSize: 12, fontWeight: status?.lanAuthEnabled !== false ? 600 : 400, background: status?.lanAuthEnabled !== false ? 'var(--dsw-alias-button-primary-fill, var(--dsw-alias-brand-primary,#4f6ef7))' : 'var(--dsw-alias-bg-layer-1,#fff)', color: status?.lanAuthEnabled !== false ? 'var(--dsw-alias-label-primary-foreground, #fff)' : 'var(--dsw-alias-label-primary,inherit)' },
-              onClick: () => setLanAuth(true),
-            }, t('on')),
-            h('button', {
-              style: { ...styles.btn, height: 28, padding: '0 12px', fontSize: 12, fontWeight: status?.lanAuthEnabled === false ? 600 : 400, background: status?.lanAuthEnabled === false ? 'var(--dsw-alias-state-error-primary,#dc2626)' : 'var(--dsw-alias-bg-layer-1,#fff)', color: status?.lanAuthEnabled === false ? '#fff' : 'var(--dsw-alias-label-primary,inherit)' },
-              onClick: () => setLanAuth(false),
-            }, t('off')),
-          ),
-          status?.lanAuthEnabled !== false
-            ? (customPin?.which === 'lan'
-                ? customPinRow('lan')
-                : h('div', { style: { marginTop: 6, fontSize: 12, color: 'var(--dsw-alias-label-secondary,#6b7280)', lineHeight: 1.5 } },
-                  fmt(t, status?.lanPinCustom ? 'lanPinCustomValue' : 'lanPinValue', { pin: status.lanToken }),
-                  h('button', { style: { ...styles.btn, height: 26, padding: '0 10px', fontSize: 12, marginLeft: 8 }, onClick: refreshLanPin }, t('refresh')),
-                  customBtn('lan'),
-                ))
-            : h('div', { style: { marginTop: 6, fontSize: 12, color: 'var(--dsw-alias-state-warn-primary,#b45309)', lineHeight: 1.5 } },
-              t('lanPinOff')),
+            qrArea(status.lanQr, lanUrl, t('lanHint')),
+            // 访问密码行：开关 + 值（关闭时提示直连）
+            row(t('lanPin'), Switch(status?.lanAuthEnabled !== false, () => setLanAuth(status?.lanAuthEnabled === false)),
+              status?.lanAuthEnabled === false
+                ? h('div', { style: { ...styles.muted, marginTop: 6 } }, t('lanPinOff'))
+                : (customPin?.which === 'lan'
+                  ? customPinRow('lan')
+                  : h('div', { style: { marginTop: 6, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
+                    h('span', { style: { fontFamily: 'ui-monospace,Menlo,monospace', fontSize: 13, letterSpacing: 1 } }, status.lanToken),
+                    h('button', { style: { ...styles.btn, height: 26, padding: '0 10px', fontSize: 12 }, onClick: refreshLanPin }, t('refresh')),
+                    customBtn('lan'),
+                    status?.lanPinCustom ? h('span', { style: { fontSize: 11, color: 'var(--dsw-alias-state-warn-primary,#b45309)' } }, t('pinCustomHint')) : null,
+                  ))),
+            // 高级：手动选地址（默认收起）
+            row(t('advAddress'),
+              h('button', { style: { border: 'none', background: 'none', font: 'inherit', cursor: 'pointer', fontSize: 12, color: 'var(--dsw-alias-label-tertiary,#8b93a1)', padding: 0 }, onClick: () => setAdvOpen((v) => !v) },
+                (status?.lanIpOverride || t('lanAddressAuto')) + ' ›'),
+              advOpen ? h('div', { style: { marginTop: 8 } },
+                h('label', { style: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: 'var(--dsw-alias-label-secondary,#6b7280)' } },
+                  t('lanAddress'),
+                  h('select', {
+                    value: status?.lanIpOverride || '',
+                    onChange: (e) => setLanAddress(e.target.value),
+                    style: { font: 'inherit', height: 30, padding: '0 8px', borderRadius: 8, border: '1px solid var(--dsw-alias-border-l2,#d1d5db)', background: 'var(--dsw-alias-bg-layer-1,#fff)', color: 'var(--dsw-alias-label-primary,inherit)' },
+                  },
+                  h('option', { value: '' }, t('lanAddressAuto')),
+                  (status?.lanCandidates || []).map((ip) => h('option', { key: ip, value: ip }, ip)),
+                  ),
+                ),
+              ) : null),
           )
           : h('div', { style: styles.muted }, t('lanStarting'))),
     ),
 
-    // 公网
+    // 公网：标题行自带 开启/关闭 → 开启后：二维码+地址、地址模式行、访问密码行
     h('div', { style: styles.block },
-      h('div', { style: { fontWeight: 600, fontSize: 13 } }, t('wanTitle')),
+      h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between' } },
+        h('span', { style: { fontWeight: 600, fontSize: 13 } }, t('wanAccess')),
+        tunnelUrl
+          ? h('button', { style: { ...styles.btn, height: 28, padding: '0 12px', fontSize: 12, color: 'var(--dsw-alias-state-error-primary,#dc2626)' }, onClick: stopTunnel }, t('stopTunnel'))
+          : h('button', { style: { ...styles.primary, height: 28, padding: '0 14px', fontSize: 12 }, onClick: startTunnel, disabled: busy || tunnelStarting }, busy || tunnelStarting ? t('opening') : t('enable')),
+      ),
+      tunnelStarting
+        ? h('div', { style: { marginTop: 8, fontSize: 12, color: 'var(--dsw-alias-label-secondary,#6b7280)' } },
+          tunnelPhase === 'downloading'
+            ? fmt(t, 'downloading', { s: elapsed(tunnelStateStarted) })
+            : fmt(t, 'connecting', { s: elapsed(tunnelStateStarted), suffix: elapsed(tunnelStateStarted) > 30 ? t('slowHint') : '' }))
+        : tunnelPhase === 'error'
+          ? h('div', { style: { marginTop: 8, fontSize: 12, color: 'var(--dsw-alias-state-error-primary,#dc2626)' } },
+            fmt(t, 'error', { detail: errText(tunnelStateDetail) || t('unknownError') }))
+          : (!tunnelUrl && !isDesktop ? h('div', { style: { ...styles.muted, marginTop: 8 } }, t('wanOffHint')) : null),
       tunnelUrl
         ? h('div', null,
-          h('img', { src: status.tunnelQr, alt: 'Tunnel QR', style: styles.qr }),
-          h('div', { style: styles.code }, tunnelUrl),
-          h('div', { style: styles.muted }, t('wanHint')),
+          qrArea(status.tunnelQr, tunnelUrl, namedMode ? t('namedRunningHint') : t('wanHint')),
+          // 防钓鱼 / 别收藏（issue #82）：公网链接仅本次有效、勿收藏提示
+          h('div', { style: { marginTop: 8, fontSize: 12, lineHeight: 1.5, borderLeft: '4px solid var(--dsw-alias-state-warn-primary,#b45309)', background: 'var(--dsw-alias-bg-layer-2,#f3f4f6)', borderRadius: 8, padding: '8px 10px' } }, t('wanEphemeralWarn')),
+          // 地址模式行（随机/固定；固定域名选中或编辑时高亮）
+          row(t('modeLabel'),
+            h('span', { style: { display: 'inline-flex', gap: 6 } },
+              h('button', { style: modeBtnStyle(!namedActive), onClick: namedMode ? switchToQuick : (tunnelCfg ? () => setTunnelCfg(null) : undefined) }, t('modeQuick')),
+              h('button', { style: modeBtnStyle(namedActive), onClick: () => setTunnelCfg(tunnelCfg ? null : { hostname: tunnelModeView.hostname ?? '', token: '', err: null }) }, t('modeNamed')),
+            ),
+            h('div', { style: { marginTop: 6 } },
+              // 刚保存固定域名但当前连接仍是随机域名：需关闭后重新开启才生效
+              namedMode && /trycloudflare\.com/i.test(tunnelUrl ?? '') ? h('div', { style: { ...styles.warn } }, t('namedTakeEffect')) : null,
+              // 固定域名：已保存摘要 + 修改入口（非编辑态）
+              namedMode && !tunnelCfg ? h('div', { style: { ...styles.muted } },
+                fmt(t, 'namedSummary', { host: tunnelModeView.hostname || '—', token: tunnelModeView.tokenSet ? t('namedTokenSet') : t('namedTokenMissing') }),
+                h('button', { style: { ...styles.btn, height: 26, padding: '0 10px', fontSize: 12, marginLeft: 8 }, onClick: () => setTunnelCfg({ hostname: tunnelModeView.hostname ?? '', token: '', err: null }) }, t('namedEdit')),
+                h('div', { style: { ...styles.muted, marginTop: 4 } }, t('namedHow')),
+                !tunnelModeView.tokenSet || !tunnelModeView.hostname ? h('div', { style: { marginTop: 2, color: 'var(--dsw-alias-state-error-primary,#dc2626)' } }, t('namedNeedCfg')) : null,
+              ) : null,
+              // 固定域名：编辑表单（域名 + Tunnel Token，Token 留空保持不变）
+              tunnelCfg ? h('div', { style: { marginTop: 6, fontSize: 12, color: 'var(--dsw-alias-label-secondary,#6b7280)', lineHeight: 1.6 } },
+                h('div', null,
+                  t('namedHostnameLabel'),
+                  h('input', {
+                    style: { margin: '4px 0 0 6px', padding: '4px 8px', fontSize: 13, border: '1px solid var(--dsw-alias-border-l2,#d1d5db)', borderRadius: 6, outline: 'none', width: 200 },
+                    placeholder: 'pocket.example.com',
+                    value: tunnelCfg.hostname ?? '',
+                    autoFocus: true,
+                    onChange: (e) => setTunnelCfg((c) => ({ ...c, hostname: e.target.value.trim(), err: null })),
+                    onKeyDown: (e) => { if (e.key === 'Enter') saveNamedTunnel(); if (e.key === 'Escape') setTunnelCfg(null); },
+                  }),
+                ),
+                h('div', { style: { marginTop: 6 } },
+                  t('namedTokenLabel'),
+                  h('input', {
+                    style: { margin: '4px 0 0 6px', padding: '4px 8px', fontSize: 13, border: '1px solid var(--dsw-alias-border-l2,#d1d5db)', borderRadius: 6, outline: 'none', width: 240, fontFamily: 'ui-monospace,Menlo,monospace' },
+                    type: 'password',
+                    value: tunnelCfg.token ?? '',
+                    onChange: (e) => setTunnelCfg((c) => ({ ...c, token: e.target.value.trim(), err: null })),
+                    onKeyDown: (e) => { if (e.key === 'Enter') saveNamedTunnel(); if (e.key === 'Escape') setTunnelCfg(null); },
+                  }),
+                ),
+                h('div', { style: { marginTop: 6, display: 'flex', gap: 8 } },
+                  h('button', { style: { ...styles.btn, height: 26, padding: '0 10px', fontSize: 12 }, onClick: saveNamedTunnel }, t('save')),
+                  h('button', { style: { ...styles.btn, height: 26, padding: '0 10px', fontSize: 12 }, onClick: () => setTunnelCfg(null) }, t('cancel')),
+                ),
+                h('div', { style: { ...styles.muted, marginTop: 6 } }, t('namedHow')),
+                h('div', { style: { marginTop: 2, fontSize: 11, color: 'var(--dsw-alias-state-warn-primary,#b45309)', lineHeight: 1.5 } }, t('namedSecurity')),
+                tunnelCfg.err ? h('div', { style: { color: 'var(--dsw-alias-state-error-primary,#dc2626)', marginTop: 4 } }, errText(tunnelCfg.err)) : null,
+              ) : null,
+            ),
+          ),
+          // 访问密码行：值 + 自定义（自定义输入态整体替换）
           status.accessToken
-            ? (customPin?.which === 'public'
-                ? customPinRow('public')
-                : h('div', { style: { marginTop: 6, fontSize: 12, color: 'var(--dsw-alias-label-secondary,#6b7280)', lineHeight: 1.5 } },
-                  fmt(t, status?.publicPinCustom ? 'wanPinCustom' : 'wanPin', { pin: status.accessToken }),
-                  customBtn('public'),
-                  status?.publicPinCustom ? h('div', { style: { marginTop: 2, fontSize: 11, color: 'var(--dsw-alias-state-warn-primary,#b45309)' } }, t('pinCustomHint')) : null,
-                ))
+            ? row(t('pinLabel'),
+              customPin?.which === 'public'
+                ? null
+                : h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 8 } },
+                  h('span', { style: { fontFamily: 'ui-monospace,Menlo,monospace', fontSize: 13, letterSpacing: 1 } }, status.accessToken),
+                  customBtn('public')),
+              h('div', { style: { marginTop: 6 } },
+                customPin?.which === 'public' ? customPinRow('public') : null,
+                status?.publicPinCustom ? h('div', { style: { ...styles.warn } }, t('pinCustomHint')) : null,
+                namedMode ? h('div', { style: { ...styles.warn } }, t('namedSecurity')) : null))
             : null,
-          h('button', { style: styles.btn, onClick: stopTunnel }, t('stopTunnel')),
         )
-        : h('div', null,
-          h('button', { style: { ...styles.primary, margin: '8px 0' }, onClick: startTunnel, disabled: busy || tunnelStarting }, busy ? t('opening') : t('enable')),
-          tunnelStarting
-            ? h('div', { style: { marginTop: 4, fontSize: 12, color: 'var(--dsw-alias-label-secondary,#6b7280)' } },
-              tunnelPhase === 'downloading'
-                ? fmt(t, 'downloading', { s: elapsed(tunnelStateStarted) })
-                : fmt(t, 'connecting', { s: elapsed(tunnelStateStarted), suffix: elapsed(tunnelStateStarted) > 30 ? t('slowHint') : '' }))
-            : tunnelPhase === 'error'
-              ? h('div', { style: { marginTop: 4, fontSize: 12, color: 'var(--dsw-alias-state-error-primary,#dc2626)' } },
-                fmt(t, 'error', { detail: tunnelStateDetail || t('unknownError') }))
-              : null,
-        ),
+        : null,
     ),
 
-    error ? h('div', { style: { color: 'var(--dsw-alias-state-error-primary,#dc2626)', fontSize: 12, marginTop: 8 } }, `❌ ${error}`) : null,
+    error ? h('div', { style: { color: 'var(--dsw-alias-state-error-primary,#dc2626)', fontSize: 12, marginTop: 8 } }, `❌ ${errText(error)}`) : null,
+
+    // 恢复出厂设置：设置出问题时的临时兜底（最底部，避免误触）
+    h('div', { style: styles.block },
+      h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 } },
+        h('span', { style: { fontWeight: 600, fontSize: 13 } }, t('resetFactory')),
+        h('button', { style: { ...styles.btn, height: 28, padding: '0 12px', fontSize: 12, color: 'var(--dsw-alias-state-error-primary,#dc2626)' }, onClick: () => setResetOpen(true) }, t('resetGo')),
+      ),
+      h('div', { style: { ...styles.muted, marginTop: 6 } }, t('resetIntro')),
+    ),
+
+    // 恢复出厂设置确认弹框
+    resetOpen ? h('div', { style: { position: 'fixed', inset: 0, zIndex: 10000, background: 'rgba(0,0,0,.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 } },
+      h('div', { style: { background: 'var(--dsw-alias-bg-layer-1,#fff)', borderRadius: 12, maxWidth: 440, width: '100%', padding: '20px 22px', boxShadow: '0 8px 32px rgba(0,0,0,.18)' } },
+        h('div', { style: { fontWeight: 600, fontSize: 15, color: 'var(--dsw-alias-state-warn-primary,#b45309)', marginBottom: 10 } }, t('resetTitle')),
+        h('div', { style: { fontSize: 13, lineHeight: 1.7, color: 'var(--dsw-alias-label-primary,inherit)', whiteSpace: 'pre-line' } }, t('resetBody')),
+        h('div', { style: { display: 'flex', gap: 8, marginTop: 16 } },
+          h('button', { style: { ...styles.btn, flex: 1 }, onClick: () => setResetOpen(false) }, t('cancel')),
+          h('button', { style: { ...styles.primary, flex: 1, background: 'var(--dsw-alias-state-error-primary,#dc2626)' }, onClick: doFactoryReset }, t('resetConfirm')),
+        ),
+      ),
+    ) : null,
+
+    // Toast：重置等操作的即时反馈（固定屏幕正中央，2.6s 自动消失）
+    toast ? h('div', {
+      style: { position: 'fixed', left: '50%', top: '50%', transform: 'translate(-50%, -50%)', zIndex: 10001, width: 'auto', maxWidth: 280, background: 'rgba(17,24,39,.92)', color: '#fff', border: 'none', borderRadius: 10, padding: '10px 16px', fontSize: 13, lineHeight: 1.5, textAlign: 'center', boxShadow: '0 8px 24px rgba(0,0,0,.22)' },
+    }, toast) : null,
 
     // 局域网访问开关确认弹框（关闭/打开时弹窗提醒）
     lanToggleOpen !== null ? h('div', { style: { position: 'fixed', inset: 0, zIndex: 10000, background: 'rgba(0,0,0,.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 } },
@@ -471,6 +625,18 @@ function PocketSettingsTab({ rpcCall, t }) {
 }
 
 export function apply(ctx) {
+  // 双保险：确保 connection.isLoopback 为 true（issue #58）。
+  // 主修复在代理注入的 loopback 补丁（proxy.mjs LOOPBACK_ENV_PATCH）——它在
+  // connection 模块 provide 时就改写句柄，早于 ui-settings 选择镜像模式；
+  // 这里兜底覆盖时序差异（若本插件 apply 晚于 ui-settings，则只能影响后续读者）。
+  if (ctx?.connection) {
+    try {
+      Object.defineProperty(ctx.connection, 'isLoopback', { value: true, writable: true, configurable: true });
+    } catch {
+      try { ctx.connection.isLoopback = true; } catch { /* 忽略 */ }
+    }
+  }
+
   // 移动端适配（dsh-web-mobile 移植）：抽屉布局/触控/安全区，仅窄屏生效
   mobileApply(ctx);
 

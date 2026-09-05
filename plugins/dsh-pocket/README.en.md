@@ -44,8 +44,9 @@ What it looks like — the phone shows the exact same UI as your computer, live:
 | 📶 LAN QR access | Works out of the box: Settings → Phone access — scan the LAN QR on the same Wi-Fi (auto-detects the LAN IP; **under WSL it picks the Windows host's physical NIC IP**) |
 | 🚪 LAN switch | **Turn LAN access off/on with one click** in Settings (a confirmation dialog shows each time): off kills the LAN QR code and link instantly; public access is unaffected |
 | 🌐 Public QR (from anywhere) | Click "Enable anywhere" → cloudflared tunnel → scan the public QR over 4G / any network |
-| 🔐 Access PIN | Public links require an **8-digit PIN** (rotated on every tunnel start by default; **customizable to a fixed PIN** — custom PINs are not rotated); LAN has its own separate **8-digit PIN** (on by default; switchable off in Settings — then LAN scans connect directly) |
-| 🔑 Custom PINs | Both the public and LAN PINs can be **set to your own fixed 8-digit number** in Settings (custom PINs are never auto-rotated) |
+| 🏷️ Fixed public hostname | Optional "**Named tunnel**" mode: paste a Cloudflare Tunnel Token + your own domain — the public address stays **fixed across restarts** (see below) |
+| 🔐 Access PIN | Public links require an **8-character PIN** (rotated on every tunnel start by default; **customizable to a fixed PIN** — custom PINs are not rotated); LAN has its own separate **8-character PIN** (on by default; switchable off in Settings — then LAN scans connect directly) |
+| 🔑 Custom PINs | Both the public and LAN PINs can be **set to your own fixed 8-character PIN (letters and digits) in Settings** (custom PINs are never auto-rotated) |
 | 🧘 Session persistence | Enter the PIN once and you're set for a long time (login is tied to the computer's dsh web process: as long as it stays up, the phone won't ask again; **after a dsh web restart/update, enter it once more**) |
 | ⚡ Real-time sync | Streaming output passes through WebSocket untouched — what the computer renders, the phone renders live; fully interactive both ways; built-in WS heartbeat keep-alive (defeats silent NAT/battery link drops with auto-reconnect) |
 | 📱 Mobile-adaptive layout | Narrow screens get a drawer layout automatically (ported from dsh-web-mobile, MIT): sidebar drawer, full-width conversation, safe-area insets, touch optimizations |
@@ -91,18 +92,30 @@ Settings → **Phone access** → scan the "📶 LAN" QR code → enter the **LA
 
 ### Public (from anywhere)
 
-On the same page click "**Enable anywhere**" → **a security disclaimer pops up every time — check "I understand and agree" to proceed** (on a corporate/classified network, confirm compliance first) → wait for the tunnel (first run downloads cloudflared; macOS/Linux use the Tsinghua mirror, seconds) → scan the "🌐 Public" QR code → the phone opens the link and **enters the 8-digit PIN** (shown in the settings page's public section; **rotated on every tunnel start by default**, or **Customize** it to a fixed PIN that is never rotated) → works from outside (4G / office network).
+On the same page click "**Enable anywhere**" → **a security disclaimer pops up every time — check "I understand and agree" to proceed** (on a corporate/classified network, confirm compliance first) → wait for the tunnel (first run downloads cloudflared; macOS/Linux use the Tsinghua mirror, seconds) → scan the "🌐 Public" QR code → the phone opens the link and **enters the 8-character PIN** (shown in the settings page's public section; **rotated on every tunnel start by default**, or **Customize** it to a fixed PIN — letters and digits — that is never rotated) → works from outside (4G / office network).
 
 > Upgrading: `dsh plugin --profile web update dsh-pocket --latest -w` (`--latest` is required across major versions — a `^0.x` range won't auto-jump to 1.x).
 
+### Fixed public hostname (named tunnel, optional)
+
+The default "quick tunnel" gets a new random URL on every restart. For a **fixed public address**, use a Cloudflare **named tunnel** (requires a Cloudflare account + your own domain):
+
+1. In [Cloudflare Zero Trust](https://one.dash.cloudflare.com/) → **Networks → Tunnels**, create a Tunnel and copy the **Tunnel Token**
+2. In that Tunnel's **Public Hostname**, point your domain (e.g. `pocket.example.com`) to `http://127.0.0.1:3081`
+3. Back in the settings page's public section: switch the mode to "**Named tunnel**", paste the Tunnel Token, enter the fixed hostname, and save
+4. Click "Enable anywhere" → the public address is now your own hostname and **survives restarts**
+
+Note: in named-tunnel mode the public PIN is **not auto-rotated** (the address is fixed, so the PIN stays the same across restarts) — manage it proactively with a custom PIN. The Tunnel Token is stored locally only (`$DSH_HOME/dsh-pocket/settings.json`, readable by your user only) and is never echoed back in the UI.
+
 ## ⚠️ Security (read first)
 
-- **DSH can execute code on your computer.** **LAN** QR/URL plus its own **8-digit PIN** is the key (PIN **on by default**, switchable off — then LAN scans connect directly, same-network devices only) — **never share the LAN QR, URL or PIN**.
+- **DSH can execute code on your computer.** **LAN** QR/URL plus its own **8-character PIN** is the key (PIN **on by default**, switchable off — then LAN scans connect directly, same-network devices only) — **never share the LAN QR, URL or PIN**.
 - **Read and accept the security disclaimer before enabling public access** (the dialog shows on every enable; the server enforces it, so it can't be bypassed): public = exposing a code-executing DSH to the internet — use a strong PIN, turn it off when done, never on classified networks.
-- **Public** access is protected by an **8-digit PIN**: the link is random, the PIN rotates on every tunnel start by default, and old links die instantly — even a leaked link can't get in. **A custom PIN is never auto-rotated** (your value stays stable).
+- **Public** access is protected by an **8-character PIN**: the link is random, the PIN rotates on every tunnel start by default, and old links die instantly — even a leaked link can't get in. **A custom PIN is never auto-rotated** (your value stays stable; custom PINs may use letters and digits).
 - Phone login state is tied to the computer's dsh web process: **no re-entry while dsh web stays up; one re-entry after a restart/update**.
 - **Login rate limiting** (anti brute-force): **5** consecutive wrong PINs from the same IP lock it for **60s**; a global failure threshold briefly locks everyone (blocks distributed IP-rotation scans); a successful login resets the counter.
-- The public URL is randomly assigned by cloudflared and **changes on every restart** (old links die automatically — a natural key rotation).
+- The public URL is randomly assigned by cloudflared and **changes on every restart** (old links die automatically — a natural key rotation); in **named-tunnel fixed-hostname** mode the address stays and the PIN is not auto-rotated — manage it with a custom PIN.
+- **Public detection is fail-closed** (issue #66): everything except loopback and private LAN addresses is treated as **public and PIN-gated** — including any self-hosted tunnel / reverse proxy pointing at the local port with its own hostname. There is no "change the domain to bypass the PIN" hole.
 - LAN mode exposes nothing publicly; only devices on the same network can reach it.
 - Built for personal use; the public PIN lives in `$DSH_HOME/dsh-pocket/token` (re-rolled per tunnel start unless customized), the LAN PIN in `$DSH_HOME/dsh-pocket/token-lan` (refreshed manually in Settings), and switches/custom flags in `$DSH_HOME/dsh-pocket/settings.json`.
 
@@ -119,6 +132,9 @@ On the same page click "**Enable anywhere**" → **a security disclaimer pops up
 | `ERR_PNPM_ADDING_TO_ROOT` | pnpm 9 workspace-root restriction: append `-w` (`--workspace-root`) to install/update commands |
 | Nothing changed after install/update | **You must restart `dsh web`**; the running process still loads the old code |
 | `listen EADDRINUSE ... :3081` | A stale dsh-pocket process holds the port: macOS/Linux `lsof -ti :3081 \| xargs kill -9`; Windows `netstat -ano \| findstr :3081` (find the LISTENING PID) → `taskkill /PID <PID> /F`, then retry |
+| Want a different port (issue #70) | Plugin mode: write `"proxyPort": 3082` into `$DSH_HOME/dsh-pocket/settings.json` and restart `dsh web`. CLI mode: `dsh-pocket --port 3082`. If the port is taken you'll get `EADDRINUSE` — kill the old process or pick another one |
+| Issue a temporary PIN to a guest (issue #69) | Settings → "Temporary access PINs" → pick public/LAN + duration (1h/24h/7d) + note → Create. Share the 8-char PIN + the access URL with the guest; it auto-expires and can be revoked manually. Temp PINs share the main PIN rate limit |
+| cloudflared install fails on a remote Linux server (issue #45) | If all CDN sources (GitHub / ghproxy / gh.ddlc / gh-proxy) are unreachable on a remote Linux host, install `cloudflared` yourself (e.g. `apt install cloudflared`, `dnf install cloudflared`, or download the tgz and unpack it), then add `"cloudflaredPath": "/path/to/cloudflared"` into `$DSH_HOME/dsh-pocket/settings.json` and restart `dsh web`. The plugin will then use that binary directly and skip the auto-download |
 | Version stuck below 1.x | `^0.x` ranges never jump to 1.x: update with `--latest` (`dsh plugin --profile web update dsh-pocket --latest -w`) |
 | Public `error 1033` | See "Public tunnel troubleshooting" below — usually a local proxy/VPN (Clash etc. TUN mode) killing the tunnel |
 | After "Restart dsh web", the page says the process is running in the background | The new process from in-page self-restart is a detached background process (not attached to your terminal) — that's the standard way to apply updates in-page; stop it: macOS/Linux `lsof -ti :3080 \| xargs kill -9`; Windows `netstat -ano \| findstr :3080` → `taskkill /PID <PID> /F` (logs under `$DSH_HOME` as `dsh-pocket-restart-*.log`) |
@@ -178,8 +194,10 @@ Such tools take over all traffic and often cut cloudflared's tunnel-edge connect
 ```sh
 npm install
 node client/build.mjs   # rebuild after editing client/
-npm test                # proxy / auth / compression / tunnel / service / RPC (43 tests)
+npm test                # proxy / auth / compression / tunnel / service / RPC / settings (109 tests)
 ```
+
+**Want to try your changes locally without publishing?** Point the installed plugin at your local checkout with a symlink and restart dsh web. Full steps (including switching back to the npm release) are in [LOCAL-DEV.md](./LOCAL-DEV.md).
 
 ## 🤝 Credits
 

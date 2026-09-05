@@ -3,6 +3,7 @@ import {
   runWithVisionTurnBudget,
 } from './turn-budget-context.js'
 import { runWithDepthConfig } from './depth-guidance.js'
+import { runtimeLanguageFor } from './runtime-i18n.js'
 
 const STRUCTURED_EVIDENCE_TOOLS = new Set([
   'vision_describe',
@@ -14,11 +15,14 @@ const STRUCTURED_EVIDENCE_TOOLS = new Set([
   'vision_long_screenshot_ocr',
 ])
 
-const DEFAULT_TURN_BUDGET_MS = 90_000
+const DEFAULT_TURN_BUDGET_MS = 0
 const MAX_TURN_BUDGET_MS = 600_000
 const MAX_GUIDANCE_OVERRIDES = 14
 const MAX_GUIDANCE_CHARS = 2_000
+const MAX_NON_PROGRESS_ATTEMPTS = 3
+const MAX_EVIDENCE_SIGNATURE_CHARS = 4_096
 const BUDGETED_TIMEOUT_FIELDS = ['timeoutMs', 'visionTaskTimeoutMs', 'ocrTimeoutMs']
+const EVIDENCE_META_KEYS = new Set(['ok', 'code', 'retryable', 'reason', 'phase', 'next'])
 const GUIDANCE_KINDS = new Set([
   'code',
   'document',
@@ -37,11 +41,22 @@ const GUIDANCE_KINDS = new Set([
 ])
 
 const BUILTIN_MIXED_GUIDANCE = {
-  document: '语义优先；只有逐字引用、合同/表单字段或表格数字确需保真时才使用 OCR。',
-  ui: '优先用 vision_detect / vision_ground 验证元素、状态与位置。',
-  code: '逐字核对代码；对可执行字符、缩进和符号做交叉验证。',
-  chat: '按气泡顺序核对发言者、消息内容与时间/状态信息。',
-  general: '聚焦尚未归类的另一部分可见内容，自行选择最能新增证据的视觉工具。',
+  zh: {
+    document: '语义优先；只有逐字引用、合同/表单字段或表格数字确需保真时才使用 OCR。',
+    ui: '优先用 vision_detect / vision_ground 验证元素、状态与位置。',
+    code: '逐字核对代码；对可执行字符、缩进和符号做交叉验证。',
+    chat: '按气泡顺序核对发言者、消息内容与时间/状态信息。',
+    general: '聚焦尚未归类的另一部分可见内容，自行选择最能新增证据的视觉工具。',
+    fallback: '聚焦这个分支新增或验证可见证据。',
+  },
+  en: {
+    document: 'Prioritize semantics; use OCR only when verbatim quotes, contract/form fields, or table numbers require exact transcription.',
+    ui: 'Prefer vision_detect / vision_ground to verify elements, states, and positions.',
+    code: 'Verify code verbatim; cross-check executable characters, indentation, and symbols.',
+    chat: 'Verify speakers, message text, and time/status information in bubble order.',
+    general: 'Focus on the remaining unclassified visible content and choose the vision tool that adds the most useful evidence.',
+    fallback: 'Add or verify visible evidence for this branch.',
+  },
 }
 
 function isObject(value) {
@@ -63,6 +78,8 @@ function resultCode(value) {
   return isObject(parsed) && typeof parsed.code === 'string' ? parsed.code : undefined
 }
 
+// Historical structural classifier retained for compatibility with callers
+// that only need to distinguish a result envelope from an outright failure.
 export function producedStructuredEvidence(value) {
   if (value === undefined || value === null) return false
   if (typeof value === 'string') {
@@ -81,15 +98,63 @@ export function producedStructuredEvidence(value) {
   return true
 }
 
-export function structuredDepthLimit(depth, customMax) {
-  if (depth === 'custom') {
-    const value = Number(customMax)
-    if (!Number.isFinite(value) || value <= 0) return undefined
-    return Math.min(100, Math.max(1, Math.floor(value)))
+function meaningfulEvidenceValue(value) {
+  if (value === undefined || value === null) return false
+  if (typeof value === 'string') return value.trim() !== ''
+  if (typeof value === 'number') return Number.isFinite(value)
+  if (typeof value === 'boolean') return true
+  if (Array.isArray(value)) return value.length > 0 && value.some(meaningfulEvidenceValue)
+  if (!isObject(value) || value.ok === false) return false
+  return Object.entries(value).some(([key, child]) => (
+    !EVIDENCE_META_KEYS.has(key) && meaningfulEvidenceValue(child)
+  ))
+}
+
+/**
+ * Evidence that is strong enough to advance the 1+x flow and consume an
+ * explicit deep-dive call cap. Empty arrays/objects and metadata-only success
+ * envelopes do not count. Negative facts such as { match: false } or
+ * { count: 0 } still count because they are real observations, not emptiness.
+ */
+export function producedUsableStructuredEvidence(value) {
+  if (value === undefined || value === null) return false
+  if (typeof value === 'string') {
+    const text = value.trim()
+    if (text === '') return false
+    const parsed = parseJson(text)
+    if (parsed === undefined) return true
+    return producedUsableStructuredEvidence(parsed)
   }
-  if (depth === 'fast') return 1
-  if (depth === 'deep') return 4
-  return 2
+  if (Array.isArray(value)) return value.length > 0 && value.some(meaningfulEvidenceValue)
+  if (!isObject(value) || value.ok === false) return false
+  return meaningfulEvidenceValue(value)
+}
+
+/**
+ * The depth tier is guidance only. A hard call cap exists only when the user
+ * explicitly configures a positive visionDepthMaxCalls value.
+ */
+export function structuredDepthLimit(_depth, maxCalls) {
+  const value = Number(maxCalls)
+  if (!Number.isFinite(value) || value <= 0) return undefined
+  return Math.min(100, Math.max(1, Math.floor(value)))
+}
+
+function refreshDepthExhaustion(state, config) {
+  const limit = structuredDepthLimit(depthOf(config), config?.visionDepthMaxCalls)
+  state.depthExhausted = limit !== undefined && state.successfulEvidenceCalls >= limit
+  return limit
+}
+
+function resetNonProgress(state) {
+  state.consecutiveNonProgressAttempts = 0
+  state.nonProgressExhausted = false
+}
+
+function recordNonProgress(state) {
+  state.consecutiveNonProgressAttempts += 1
+  state.nonProgressExhausted = state.consecutiveNonProgressAttempts >= MAX_NON_PROGRESS_ATTEMPTS
+  return state.nonProgressExhausted
 }
 
 export function normalizeGuidanceOverrides(value) {
@@ -100,8 +165,6 @@ export function normalizeGuidanceOverrides(value) {
     const kind = typeof entry.kind === 'string' ? entry.kind.trim() : ''
     const text = typeof entry.text === 'string' ? entry.text.trim() : ''
     if (!GUIDANCE_KINDS.has(kind) || text === '') continue
-    // Last row wins. This makes duplicate imports deterministic and mirrors
-    // what users expect after editing a later row in the settings UI.
     byKind.set(kind, text.slice(0, MAX_GUIDANCE_CHARS))
   }
   return [...byKind.entries()]
@@ -109,18 +172,23 @@ export function normalizeGuidanceOverrides(value) {
     .map(([kind, text]) => ({ kind, text }))
 }
 
-function guidanceFor(kind, overrides) {
+function languageOf(config) {
+  return runtimeLanguageFor(config?.__visionRouterLocale, 'zh')
+}
+
+function guidanceFor(kind, overrides, language = 'zh') {
   for (let i = overrides.length - 1; i >= 0; i--) {
     const entry = overrides[i]
     if (entry.kind === kind) return entry.text
   }
-  return BUILTIN_MIXED_GUIDANCE[kind] ?? '聚焦这个分支新增或验证可见证据。'
+  const copy = BUILTIN_MIXED_GUIDANCE[language] ?? BUILTIN_MIXED_GUIDANCE.zh
+  return copy[kind] ?? copy.fallback
 }
 
 function turnBudgetMs(config) {
   const value = Number(config?.visionTurnBudgetMs)
-  if (!Number.isFinite(value) || value < 10_000) return DEFAULT_TURN_BUDGET_MS
-  return Math.min(Math.round(value), MAX_TURN_BUDGET_MS)
+  if (!Number.isFinite(value) || value <= 0) return DEFAULT_TURN_BUDGET_MS
+  return Math.min(Math.max(Math.round(value), 10_000), MAX_TURN_BUDGET_MS)
 }
 
 function depthOf(config) {
@@ -129,13 +197,17 @@ function depthOf(config) {
     : 'standard'
 }
 
-/**
- * Clamp the core's own timeout settings to the remaining structured-turn
- * deadline. This is the key bridge from the outer 1+x budget into the existing
- * core deadline/AbortSignal machinery: fetch, llm.stream and OCR fallbacks are
- * then genuinely cancelled at the turn boundary instead of merely being
- * refused when the NEXT tool call starts.
- */
+function hostLocalePreference(ctx) {
+  try {
+    const settings = ctx?.get?.('settings')
+    const locale = settings?.get?.('locale')
+    const preference = locale && typeof locale === 'object' ? locale.preference : undefined
+    return typeof preference === 'string' && preference.trim() !== '' ? preference.trim() : undefined
+  } catch {
+    return undefined
+  }
+}
+
 export function capConfigToVisionTurnBudget(value, now = Date.now) {
   if (!value || typeof value !== 'object') return value
   const budget = currentVisionTurnBudget()
@@ -164,8 +236,11 @@ function freshState(turn, _config) {
     successfulEvidenceCalls: 0,
     mixedBranches: [],
     completedBranches: new Set(),
+    mixedAttemptSignatures: new Set(),
+    consecutiveNonProgressAttempts: 0,
     budgetExhausted: false,
     depthExhausted: false,
+    nonProgressExhausted: false,
     emittedGuardIds: new Set(),
   }
 }
@@ -173,6 +248,7 @@ function freshState(turn, _config) {
 function activateBudget(state, config) {
   if (state.turnSignal !== undefined) return
   const budgetMs = turnBudgetMs(config)
+  if (budgetMs <= 0) return
   const startedAt = Date.now()
   state.startedAt = startedAt
   state.deadlineAt = startedAt + budgetMs
@@ -208,15 +284,26 @@ function bootstrapEvidence(raw) {
   return parsed.evidence
 }
 
-function normalizeMixedBranches(evidence, depth) {
+function normalizeMixedBranches(evidence, _depth) {
   if (!isObject(evidence) || evidence.visual_kind !== 'mixed' || !Array.isArray(evidence.mixed_of)) return []
   const allowed = ['ui', 'document', 'code', 'chat', 'general']
   const unique = []
   for (const kind of allowed) {
     if (evidence.mixed_of.includes(kind)) unique.push(kind)
   }
-  const capped = unique.slice(0, 2)
-  return depth === 'fast' ? capped.slice(0, 1) : capped
+  return unique.slice(0, 2)
+}
+
+function evidenceAttemptSignature(name, args) {
+  let encoded
+  try {
+    encoded = JSON.stringify(args ?? null)
+  } catch {
+    encoded = String(args ?? '')
+  }
+  if (encoded.length <= MAX_EVIDENCE_SIGNATURE_CHARS) return `${name}:${encoded}`
+  const half = Math.floor(MAX_EVIDENCE_SIGNATURE_CHARS / 2)
+  return `${name}:${encoded.length}:${encoded.slice(0, half)}:${encoded.slice(-half)}`
 }
 
 function inferBranchForTool(name, pending) {
@@ -225,15 +312,21 @@ function inferBranchForTool(name, pending) {
   if (name === 'vision_long_screenshot_ocr') return prefer(['document', 'chat', 'code', 'general'])
   if (name === 'vision_ocr') return prefer(['document', 'code', 'chat', 'general'])
   if (name === 'vision_colors' || name === 'vision_pixel_diff') return prefer(['general', 'ui'])
-  return pending[0]
+  return pending.length === 1 ? pending[0] : undefined
 }
 
-function recordEvidenceSuccess(state, name) {
+function recordEvidenceSuccess(state, name, args) {
   state.successfulEvidenceCalls += 1
-  if (state.mixedBranches.length === 0) return
+  if (state.mixedBranches.length === 0) return true
   const pending = state.mixedBranches.filter((kind) => !state.completedBranches.has(kind))
+  if (pending.length === 0) return true
+  const signature = evidenceAttemptSignature(name, args)
+  if (state.mixedAttemptSignatures.has(signature)) return false
+  state.mixedAttemptSignatures.add(signature)
   const branch = inferBranchForTool(name, pending)
-  if (branch) state.completedBranches.add(branch)
+  if (!branch) return false
+  state.completedBranches.add(branch)
+  return true
 }
 
 function missingEvidence(state) {
@@ -249,10 +342,15 @@ function hasCoreFollowup(messages) {
   )
 }
 
-function withoutCoreFollowup(messages) {
-  return (messages ?? []).filter(
-    (message) => !(message && typeof message.id === 'string' && message.id.includes('vision-router-structured-followup-')),
-  )
+function withoutEvidenceFollowups(messages) {
+  return (messages ?? []).filter((message) => {
+    const id = message && typeof message.id === 'string' ? message.id : ''
+    return !(
+      id.includes('vision-router-structured-followup-') ||
+      id.includes('vision-router-structured-mixed-guard-') ||
+      id.includes('vision-router-structured-evidence-guard-')
+    )
+  })
 }
 
 function hasMessageId(messages, id) {
@@ -261,12 +359,12 @@ function hasMessageId(messages, id) {
   )
 }
 
-function appendSyntheticGuardOnce(decision, baseMessages, state, message, stripCoreFollowup = false) {
-  const messages = stripCoreFollowup ? withoutCoreFollowup(baseMessages) : baseMessages
+function appendSyntheticGuardOnce(decision, baseMessages, state, message, stripEvidenceFollowups = false) {
+  const messages = stripEvidenceFollowups ? withoutEvidenceFollowups(baseMessages) : baseMessages
   const id = message?.id
   if (typeof id === 'string' && (state.emittedGuardIds.has(id) || hasMessageId(messages, id))) {
     state.emittedGuardIds.add(id)
-    return stripCoreFollowup ? { ...decision, messages } : decision
+    return stripEvidenceFollowups ? { ...decision, messages } : decision
   }
   if (typeof id === 'string') state.emittedGuardIds.add(id)
   return {
@@ -275,11 +373,27 @@ function appendSyntheticGuardOnce(decision, baseMessages, state, message, stripC
   }
 }
 
+function rearmEvidenceGuardAfterAttempt(state) {
+  const mixedPrefix = `vision-router-structured-mixed-guard-${state.turn}-`
+  const evidenceId = `vision-router-structured-evidence-guard-${state.turn}`
+  for (const id of state.emittedGuardIds) {
+    if (id === evidenceId || id.startsWith(mixedPrefix)) state.emittedGuardIds.delete(id)
+  }
+}
+
 function mixedReminder(state, config) {
+  const language = languageOf(config)
   const overrides = normalizeGuidanceOverrides(config?.guidanceOverrides)
   const pending = state.mixedBranches.filter((kind) => !state.completedBranches.has(kind))
   const done = state.mixedBranches.filter((kind) => state.completedBranches.has(kind))
-  const lines = pending.map((kind) => `- ${kind}：${guidanceFor(kind, overrides)}`)
+  const separator = language === 'en' ? ': ' : '：'
+  const lines = pending.map((kind) => `- ${kind}${separator}${guidanceFor(kind, overrides, language)}`)
+  if (language === 'en') {
+    const doneText = done.length > 0 ? `Verified branches: ${done.join(' + ')}. ` : ''
+    return `${doneText}This mixed image still has unverified branches: ${pending.join(' + ')}. ` +
+      'Focus each vision call on one unfinished branch; answer only after each branch has produced at least one useful piece of evidence.\n' +
+      lines.join('\n')
+  }
   const doneText = done.length > 0 ? `已验证分支：${done.join(' + ')}。` : ''
   return `${doneText}混合图片仍有未验证分支：${pending.join(' + ')}。` +
     '每次视觉调用只聚焦一个尚未完成的分支；这些分支分别产生至少一次有效证据后再作答。\n' +
@@ -293,16 +407,26 @@ function appendGuardMessage(decision, payload, state, config) {
     : Array.isArray(payload?.messages)
       ? payload.messages
       : []
+  const language = languageOf(config)
 
-  if (state.budgetExhausted || state.depthExhausted) {
+  if (state.budgetExhausted || state.depthExhausted || state.nonProgressExhausted) {
+    const stopKind = state.budgetExhausted ? 'budget' : state.depthExhausted ? 'depth' : 'non-progress'
     const message = {
       role: 'user',
-      id: `vision-router-structured-guard-stop-${state.turn}`,
+      id: `vision-router-structured-guard-stop-${state.turn}-${stopKind}`,
       content: [{
         type: 'text',
-        text: state.budgetExhausted
-          ? '本轮视觉总时间预算已耗尽。不要再调用视觉工具；请基于已经获得的证据作答，并明确仍存在的不确定性。'
-          : '本轮识图深度配额已耗尽。不要再调用视觉工具；请基于已经获得的证据作答，并明确仍存在的不确定性。',
+        text: language === 'en'
+          ? state.budgetExhausted
+            ? 'The visual turn time budget is exhausted. Do not call more vision tools; answer from the evidence already collected and state any remaining uncertainty.'
+            : state.depthExhausted
+              ? 'The configured deep-dive call cap has been reached. Do not call more vision tools; answer from the evidence already collected and state any remaining uncertainty.'
+              : 'Repeated follow-up vision attempts did not produce or advance usable evidence. Do not keep retrying vision tools; answer from the evidence already collected and state the remaining uncertainty.'
+          : state.budgetExhausted
+            ? '本轮视觉总时间预算已耗尽。不要再调用视觉工具；请基于已经获得的证据作答，并明确仍存在的不确定性。'
+            : state.depthExhausted
+              ? '已达到本轮设置的深挖次数上限。不要再调用视觉工具；请基于已经获得的证据作答，并明确仍存在的不确定性。'
+              : '连续多次后续视觉调用都没有产出或推进可用证据。不要继续重复调用视觉工具；请基于已经获得的证据作答，并明确仍存在的不确定性。',
       }],
       source: { kind: 'plugin', plugin: 'dsh-vision-router' },
     }
@@ -327,7 +451,9 @@ function appendGuardMessage(decision, payload, state, config) {
     id: `vision-router-structured-evidence-guard-${state.turn}`,
     content: [{
       type: 'text',
-      text: '结构化预识别已经完成，但上一条后续工具没有产出可用证据。请再调用至少一个能新增或验证证据的视觉工具，成功后再作答。',
+      text: language === 'en'
+        ? 'The structured bootstrap is complete, but the previous follow-up tool did not produce usable evidence. Call at least one more vision tool that can add or verify evidence, then answer after it succeeds.'
+        : '结构化预识别已经完成，但上一条后续工具没有产出可用证据。请再调用至少一个能新增或验证证据的视觉工具，成功后再作答。',
     }],
     source: { kind: 'plugin', plugin: 'dsh-vision-router' },
   }
@@ -356,9 +482,6 @@ async function executeWithinTurnBudget(state, execute) {
       signal?.addEventListener('abort', abortHandler, { once: true })
     })
     try {
-      // The race is a last-resort availability fence for a local helper that
-      // ignores AbortSignal. Normal network/LLM/OCR work also sees the ambient
-      // budget through capConfigToVisionTurnBudget and is cancelled at source.
       return await Promise.race([Promise.resolve().then(execute), aborted])
     } finally {
       if (signal && abortHandler) signal.removeEventListener('abort', abortHandler)
@@ -421,23 +544,12 @@ function wrapRegisteredTool(def, states, getConfig) {
             state.bootstrapResult = result
             state.mixedBranches = normalizeMixedBranches(evidence, depthOf(getConfig()))
             state.completedBranches.clear()
-            state.successfulEvidenceCalls = 0
+            state.mixedAttemptSignatures.clear()
+            resetNonProgress(state)
             state.budgetExhausted = false
-            state.depthExhausted = false
+            refreshDepthExhaustion(state, getConfig())
           }
           return result
-        }
-
-        // Even an out-of-order evidence call must obey the turn wall clock. The
-        // bootstrap-order guard is handled elsewhere; time accounting must not
-        // disappear merely because the model chose the wrong tool first.
-        if (!state.bootstrapDone) {
-          return runBudgetedTool(
-            state,
-            () => def.execute(args, exec),
-            'the structured-vision turn budget expired while the visual request was running',
-            currentConfig,
-          )
         }
 
         if (budgetExceeded(state)) {
@@ -446,10 +558,15 @@ function wrapRegisteredTool(def, states, getConfig) {
         }
 
         const active = getConfig()
-        const limit = structuredDepthLimit(depthOf(active), active?.visionDepthMaxCalls)
-        if (limit !== undefined && state.successfulEvidenceCalls >= limit) {
-          state.depthExhausted = true
-          return failure('VISION_DEPTH_LIMIT', `the ${depthOf(active)} depth tier allows at most ${limit} successful deep-dive call(s) in this turn`)
+        const limit = refreshDepthExhaustion(state, active)
+        if (state.depthExhausted) {
+          return failure('VISION_DEPTH_LIMIT', `the configured deep-dive call cap allows at most ${limit} successful evidence call(s) in this turn`)
+        }
+        if (state.bootstrapDone && missingEvidence(state) > 0 && state.nonProgressExhausted) {
+          return failure(
+            'VISION_NO_PROGRESS_LIMIT',
+            `the structured follow-up stopped after ${MAX_NON_PROGRESS_ATTEMPTS} consecutive attempts without usable evidence progress`,
+          )
         }
 
         const result = await runBudgetedTool(
@@ -459,9 +576,23 @@ function wrapRegisteredTool(def, states, getConfig) {
           active,
         )
         const code = resultCode(result)
-        if (code === 'VISION_DEPTH_LIMIT') state.depthExhausted = true
         if (code === 'VISION_TURN_BUDGET_EXCEEDED') state.budgetExhausted = true
-        if (producedStructuredEvidence(result)) recordEvidenceSuccess(state, def.name)
+        if (producedUsableStructuredEvidence(result)) {
+          const progressed = recordEvidenceSuccess(state, def.name, args)
+          refreshDepthExhaustion(state, active)
+          if (state.bootstrapDone && missingEvidence(state) > 0) {
+            if (progressed) resetNonProgress(state)
+            else {
+              recordNonProgress(state)
+              if (!state.nonProgressExhausted) rearmEvidenceGuardAfterAttempt(state)
+            }
+          } else {
+            resetNonProgress(state)
+          }
+        } else if (code !== 'VISION_TURN_BUDGET_EXCEEDED' && state.bootstrapDone && missingEvidence(state) > 0) {
+          recordNonProgress(state)
+          if (!state.nonProgressExhausted) rearmEvidenceGuardAfterAttempt(state)
+        }
         return result
       })
     },
@@ -510,9 +641,6 @@ function wrapSettingsService(settings, setScope) {
       return (namespace, ...args) => {
         const scope = register.call(target, namespace, ...args)
         if (namespace !== 'vision-router') return scope
-        // Keep the uncapped scope for guard policy (depth/guidance/budget at
-        // turn start); only the core's reads during an executing tool receive
-        // the remaining-time timeout clamp.
         setScope(scope)
         return wrapSettingsScope(scope)
       }
@@ -526,9 +654,6 @@ function wrapSettingsContext(childCtx, setScope) {
   return new Proxy(childCtx, {
     get(target, property) {
       if (property === 'settings') return settings
-      // Bind lifecycle methods to the exact injected child context. This keeps
-      // Cordis ownership semantics intact even though Settings itself is viewed
-      // through a narrow proxy.
       const value = Reflect.get(target, property, target)
       return typeof value === 'function' ? value.bind(target) : value
     },
@@ -543,7 +668,9 @@ export function installStructuredFlowHardening(ctx, config = {}) {
   const activeConfig = () => {
     try {
       const value = settingsScope && typeof settingsScope.get === 'function' ? settingsScope.get() : config
-      return value && typeof value === 'object' ? value : config
+      const base = value && typeof value === 'object' ? value : config
+      const locale = hostLocalePreference(ctx)
+      return locale === undefined ? base : { ...base, __visionRouterLocale: locale }
     } catch {
       return config
     }
@@ -585,8 +712,12 @@ export function installStructuredFlowHardening(ctx, config = {}) {
             return runWithDepthConfig(current, async () => {
               const state = session ? ensureState(states, session, payload?.turn, current) : undefined
               const decision = await handler.call(this, payload, next)
-              if (state && budgetExceeded(state)) state.budgetExhausted = true
-              return state ? appendGuardMessage(decision, payload, state, activeConfig()) : decision
+              const latest = activeConfig()
+              if (state) {
+                if (budgetExceeded(state)) state.budgetExhausted = true
+                refreshDepthExhaustion(state, latest)
+              }
+              return state ? appendGuardMessage(decision, payload, state, latest) : decision
             })
           }, ...rest)
         }

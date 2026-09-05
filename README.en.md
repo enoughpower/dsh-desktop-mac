@@ -63,7 +63,7 @@ desktop/
 ├── updater.patch.yml       # registers the version/update-check plugin
 ├── skills-hub.patch.yml   # registers the global skills library plugin dsh-skills
 ├── mcp-settings.patch.yml  # registers the MCP service management plugin
-├── vision.patch.yml        # registers the vision plugin dsh-vision-router v1.7.6 (not taking over llm-deepseek)
+├── vision.patch.yml        # registers the vision plugin dsh-vision-router v2.1.2 (not taking over llm-deepseek)
 ├── theme-blackgold.patch.yml # registers the black-gold theme plugin (@frostgao/dsh-theme-blackgold)
 ├── prune.sh                # node_modules slimming script
 ├── build.sh                # one-click build
@@ -222,7 +222,7 @@ Features:
 ## Vision (dsh-vision-router)
 
 Bundled third-party plugin **dsh-vision-router** (see its
-[GitHub repo](https://github.com/ysr666/dsh-vision-router), bundled at **v1.7.6**), giving text-only models
+[GitHub repo](https://github.com/ysr666/dsh-vision-router), bundled at **v2.1.2**), giving text-only models
 (DeepSeek etc.) **pixel-faithful image understanding**:
 
 - **See the original image** (no lossy description bridge): image turns are handed to a vision model,
@@ -239,7 +239,7 @@ Bundled third-party plugin **dsh-vision-router** (see its
 
 | File | Role |
 |---|---|
-| `plugins/dsh-vision-router/` | plugin source (v1.7.6: host route + 14 vision tools + browser settings card) |
+| `plugins/dsh-vision-router/` | plugin source (v2.1.2: host route + 14 vision tools + browser settings card) |
 | `vision.patch.yml` | registers the plugin + relaxed attachment policy (20 MiB / 100 MP / 10000 px per edge; not taking over llm-deepseek) |
 
 ## Global Skills Library (dsh-skills)
@@ -324,7 +324,7 @@ Pure ESM, no native binary; its `@deepseek-ai/dsh-client-ui-theme` dep ships wit
 ## Session Cost Meter (dsh-cost-meter)
 
 Bundled **dsh-cost-meter** ([Han-1413141/dsh-cost-meter](https://github.com/Han-1413141/dsh-cost-meter),
-v1.5.38), providing session-level cost stats:
+v1.7.10), providing session-level cost stats:
 
 - **Cost**: per-conversation cost, daily totals, history; built-in 90+ model price catalog auto-matches,
   one-click sync with official prices.
@@ -344,7 +344,7 @@ v1.5.38), providing session-level cost stats:
 ## Phone Access (dsh-pocket)
 
 Bundled **dsh-pocket** ([shaobeichen/dsh-pocket](https://github.com/shaobeichen/dsh-pocket),
-v1.14.5, GPL-2.0) puts DSH "in your pocket" — **scan a QR code with your phone and see the
+v2.10.3, GPL-2.0) puts DSH "in your pocket" — **scan a QR code with your phone and see the
 same interface in real time**:
 
 - **LAN QR code**: Settings → **Phone Access** — phones on the same Wi-Fi scan to open

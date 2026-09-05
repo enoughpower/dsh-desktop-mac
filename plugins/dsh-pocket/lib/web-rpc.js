@@ -1,6 +1,12 @@
 // dsh-pocket Web RPC（loopback-only）：设置页 ⇄ Host 的手机访问通道
 
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
 import { POCKET_RPC_CHANNEL, POCKET_ENDPOINTS, redactStatus } from '../client/api.js';
+
+/** 单次读取上限：4 MB，避免把大文件塞进剪贴板 / 内存。 */
+const FILE_READ_MAX = 4 * 1024 * 1024;
 
 function ok(value) {
   return { ok: true, value };
@@ -25,7 +31,7 @@ export function killHint(port) {
 }
 
 /** 注册 /dsh-pocket 逻辑通道（仅本机 loopback 可调）。 */
-export function installPocketRpc(ctx, { service, log = console, desktop = false, runUpdate = null, restart = null, restartNotice = null, getToken = null, getLanToken = null, refreshLanToken = null, getLanAuthEnabled = null, setLanAuthEnabled = null, getLanEnabled = null, setLanEnabled = null, getLanIpOverride = null, setLanIpOverride = null, getPinCustom = null, setCustomPin = null }) {
+export function installPocketRpc(ctx, { service, log = console, desktop = false, runUpdate = null, restart = null, restartNotice = null, getToken = null, getLanToken = null, refreshLanToken = null, getLanAuthEnabled = null, setLanAuthEnabled = null, getLanEnabled = null, setLanEnabled = null, getLanIpOverride = null, setLanIpOverride = null, getPinCustom = null, setCustomPin = null, getTunnelConfig = null, setTunnelConfig = null, resetPocket = null }) {
   if (!ctx?.connection?.rpc?.handle) {
     log.warn?.('dsh-pocket: DSH Host Connection RPC unavailable — settings tab disabled | 无 Connection RPC，设置页不可用');
     return () => {};
@@ -49,6 +55,7 @@ export function installPocketRpc(ctx, { service, log = console, desktop = false,
         lanEnabled: getLanEnabled?.() ?? true,
         publicPinCustom: getPinCustom?.('public') ?? false,
         lanPinCustom: getPinCustom?.('lan') ?? false,
+        tunnelConfig: getTunnelConfig?.() ?? { mode: 'quick', hostname: '', tokenSet: false },
       });
     };
 
@@ -94,6 +101,32 @@ export function installPocketRpc(ctx, { service, log = console, desktop = false,
           return fail('bad-request', err?.message ?? String(err));
         }
       }
+      if (endpoint === POCKET_ENDPOINTS.tunnelSetConfig) {
+        // 命名隧道配置（issue #66）：{ mode, hostname, token }——token 只写不读，
+        // 留空表示保持不变（undefined 不覆盖）；返回完整 status 供前端直接替换。
+        if (!setTunnelConfig) return fail('bad-request', '隧道配置不可用 | tunnel config unavailable');
+        try {
+          setTunnelConfig({ mode: payload?.mode, hostname: payload?.hostname, token: payload?.token });
+          return await statusPayload();
+        } catch (err) {
+          return fail('bad-request', err?.message ?? String(err));
+        }
+      }
+      if (endpoint === POCKET_ENDPOINTS.pocketReset) {
+        // 恢复出厂设置：必须显式确认（payload.confirm === true），先停隧道再清空设置与密码，
+        // 返回完整 status 供前端直接替换（旧密码立即作废，手机需重新输入）。
+        if (payload?.confirm !== true) {
+          return fail('bad-request', '恢复出厂设置需要确认 | factory reset requires confirmation');
+        }
+        if (!resetPocket) return fail('bad-request', '恢复出厂设置不可用 | factory reset unavailable');
+        try {
+          service.stopTunnel();
+          resetPocket();
+          return await statusPayload();
+        } catch (err) {
+          return fail('bad-request', err?.message ?? String(err));
+        }
+      }
       if (endpoint === POCKET_ENDPOINTS.tunnelStart) {
         // 安全免责声明（issue #31）：每次开启公网都必须先确认（前端弹框勾选）。
         // 服务端强制校验，防止绕过前端直接调 RPC。
@@ -109,6 +142,53 @@ export function installPocketRpc(ctx, { service, log = console, desktop = false,
       }
       if (endpoint === POCKET_ENDPOINTS.version) {
         return ok({ current: runUpdate?.currentVersion?.() ?? null, loaded: runUpdate?.loadedVersion?.() ?? null });
+      }
+      if (endpoint === POCKET_ENDPOINTS.fileRead) {
+        // 移动端「复制文件内容」（issue #17）：手机点复制按钮 → 主机读文件正文返回。
+        // 路径三种形态：
+        //   - 绝对路径：直接用；
+        //   - ~/ 开头：展开为用户 HOME；
+        //   - 相对路径：相对「客户端传入的 cwd」或「DSH 主机进程 cwd = 工作目录」
+        //     （用户从自己项目里 `dsh web` 时，二者一致，与 dsh-web 的
+        //     resolveWorkspacePath(cwd, path) 行为对齐）。安全边界同既有 RPC：
+        //     仅本机/隧道经 PIN 可达，等同于你自己操作这台机器。
+        const raw = String(payload?.path ?? '').trim();
+        if (!raw) return fail('bad-request', '缺少文件路径 | missing path');
+        let abs;
+        try {
+          if (/^~[/\\]?/.test(raw)) {
+            // 去掉 ~ 及其后的可选斜杠，再相对 HOME 解析
+            abs = path.resolve(os.homedir(), raw.replace(/^~[/\\]?/, ''));
+          } else if (path.isAbsolute(raw)) {
+            abs = path.resolve(raw);
+          } else {
+            const base = typeof payload?.cwd === 'string' && payload.cwd ? payload.cwd : process.cwd();
+            abs = path.resolve(base, raw);
+          }
+        } catch {
+          return fail('bad-request', '路径非法 | invalid path');
+        }
+        let stat;
+        try {
+          stat = await fs.stat(abs);
+        } catch {
+          return fail('bad-request', `文件不存在：${abs} | file not found`);
+        }
+        if (stat.isDirectory()) return fail('bad-request', '这是目录，不是文件 | it is a directory');
+        if (stat.size > FILE_READ_MAX) {
+          return fail('bad-request', `文件过大（${(stat.size / 1024 / 1024).toFixed(1)} MB），无法复制 | file too large`);
+        }
+        let buf;
+        try {
+          buf = await fs.readFile(abs);
+        } catch (err) {
+          return fail('bad-request', `读取失败：${err?.message ?? String(err)} | read failed`);
+        }
+        // 二进制检测：前 8KB 含 NUL 字节即视为二进制，文本复制无意义。
+        if (buf.subarray(0, 8192).includes(0)) {
+          return fail('bad-request', '二进制文件，无法复制文本 | binary file');
+        }
+        return ok({ content: buf.toString('utf8'), path: abs, size: stat.size });
       }
       if (endpoint === POCKET_ENDPOINTS.update) {
         // 桌面端：更新由 DSH Desktop 管理，这里关闭（不删除，仅禁用）

@@ -45,6 +45,7 @@ var POCKET_ENDPOINTS = Object.freeze({
   status: "pocket.status",
   tunnelStart: "tunnel.start",
   tunnelStop: "tunnel.stop",
+  tunnelSetConfig: "tunnel.setConfig",
   version: "pocket.version",
   update: "pocket.update",
   restart: "pocket.restart",
@@ -52,7 +53,11 @@ var POCKET_ENDPOINTS = Object.freeze({
   lanAuthSetEnabled: "lanAuth.setEnabled",
   lanSetOverride: "lan.setOverride",
   lanSetEnabled: "lan.setEnabled",
-  pinSetCustom: "pin.setCustom"
+  pinSetCustom: "pin.setCustom",
+  pocketReset: "pocket.reset",
+  // 移动端「复制文件内容」（issue #17）：手机经此 RPC 让主机读取文件正文，
+  // 再写入剪贴板——因为手机无法直接打开电脑上的文件。
+  fileRead: "pocket.fileRead"
 });
 function compareVersions(a, b) {
   const pa = String(a).replace(/^[vV]/, "").split(".");
@@ -95,6 +100,7 @@ function redactStatus(s) {
     tunnelUrl: s?.tunnelUrl ?? null,
     tunnelQr: s?.tunnelQr ?? null,
     tunnelState: s?.tunnelState ?? { phase: "idle" },
+    tunnelConfig: s?.tunnelConfig ?? { mode: "quick", hostname: "", tokenSet: false },
     dshPort: s?.dshPort ?? null
   };
 }
@@ -137,6 +143,41 @@ function MobileNavToggle({ toggleSidebar, t }) {
 // client/mobile/MobileNavOverlay.tsx
 var import_react = require("react");
 var import_dsh_client_ui_primitives2 = require("@deepseek-ai/dsh-client-ui-primitives");
+
+// client/mobile/nav-targets.mjs
+var DRAWER_SELECTOR = '[data-mobile-nav="frame"] > :first-child';
+var TOGGLE_SELECTOR = '[data-mobile-nav="toggle"]';
+var NAV_TARGETS = [
+  "button[data-dsh-taskboard-entry]",
+  "button[data-dsh-ssh-entry]",
+  // 抽屉底部的 "文件" 入口打开的是 dsh-web-ui 的 explorer 面板，它的 z-index
+  // (55) 低于展开的抽屉 (600)，且在抽屉 DOM 之外：抽屉不关就会盖住面板，点
+  // 面板里的行又会被"点抽屉外就关"吃掉。所以按导航处理，一起关掉。
+  '[data-mobile-nav="files"]',
+  '[class*="sessionRow"]',
+  '[class*="newSession"]',
+  '[class*="searchResultWorkspace"]',
+  '[class*="searchResultRow"]'
+].join(", ");
+var NAV_EXCLUDE = '[class*="sessionRow"] button';
+var OVERLAY_SELECTOR = [
+  '[role="menu"]',
+  '[role="listbox"]',
+  '[role="dialog"]',
+  '[role="tooltip"]',
+  "[data-radix-popper-content-wrapper]"
+].join(", ");
+function navTargetFor(target) {
+  if (target == null || typeof target.closest !== "function") return null;
+  if (target.closest(NAV_EXCLUDE) !== null) return null;
+  return target.closest(NAV_TARGETS);
+}
+function isOverlayTap(target) {
+  if (target == null || typeof target.closest !== "function") return false;
+  return target.closest(OVERLAY_SELECTOR) !== null;
+}
+
+// client/mobile/MobileNavOverlay.tsx
 var MOBILE_QUERY = "(max-width: 1023px)";
 function useMobile() {
   const [mobile, setMobile] = (0, import_react.useState)(() => window.matchMedia(MOBILE_QUERY).matches);
@@ -198,20 +239,103 @@ function MobileNavOverlay({ toggleSidebar, t }) {
   }, [mobile, open, toggleSidebar]);
   (0, import_react.useEffect)(() => {
     if (!mobile || !open) return;
+    let lastTouchNavAt = 0;
+    let lastTouchX = 0;
+    let lastTouchY = 0;
+    let suppressTouchClickUntil = 0;
+    let pendingTouchRow = null;
+    let selectedRowAtArm = null;
+    let navClickArrived = false;
+    let navObserver = null;
+    let navTimer = null;
+    const drawerRoot = () => document.querySelector(DRAWER_SELECTOR);
+    const disarmNav = () => {
+      navObserver?.disconnect();
+      navObserver = null;
+      if (navTimer !== null) window.clearTimeout(navTimer);
+      navTimer = null;
+      pendingTouchRow = null;
+      selectedRowAtArm = null;
+      navClickArrived = false;
+    };
+    const armNav = (row) => {
+      disarmNav();
+      pendingTouchRow = row;
+      const drawer = drawerRoot();
+      selectedRowAtArm = drawer?.querySelector('[role="treeitem"][aria-selected="true"]') ?? null;
+      if (drawer === null) return;
+      navObserver = new MutationObserver(() => {
+        const frame = document.querySelector('[data-mobile-nav="frame"]');
+        if (frame === null || frame.hasAttribute("data-sidebar-collapsed")) {
+          disarmNav();
+          return;
+        }
+        const selectedRow = drawerRoot()?.querySelector('[role="treeitem"][aria-selected="true"]') ?? null;
+        if (navClickArrived && selectedRow !== null && selectedRow !== selectedRowAtArm) {
+          disarmNav();
+          toggleSidebar();
+        }
+      });
+      navObserver.observe(drawer, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ["aria-selected"]
+      });
+      navTimer = window.setTimeout(disarmNav, 2e3);
+    };
+    const navigationTarget = (target) => {
+      if (document.querySelector('[aria-modal="true"]') !== null) return null;
+      const frame = document.querySelector('[data-mobile-nav="frame"]');
+      if (frame === null || frame.hasAttribute("data-sidebar-collapsed")) return null;
+      if (!(target instanceof Element)) return null;
+      const drawer = drawerRoot();
+      if (drawer === null || !drawer.contains(target)) return null;
+      return navTargetFor(target);
+    };
+    const isPendingTouchClick = (event) => {
+      const capabilities = event.sourceCapabilities;
+      if (capabilities?.firesTouchEvents === true) return true;
+      return Math.hypot(event.clientX - lastTouchX, event.clientY - lastTouchY) <= 24;
+    };
     const onDrawerClick = (event) => {
-      if (document.querySelector('[aria-modal="true"]') !== null) return;
-      const target = event.target;
+      if (performance.now() < suppressTouchClickUntil) return;
+      if (pendingTouchRow !== null && performance.now() - lastTouchNavAt < 500 && isPendingTouchClick(event)) {
+        const target = navigationTarget(event.target);
+        const row = target?.closest('[role="treeitem"]');
+        if (row !== null && row !== void 0) {
+          pendingTouchRow = row;
+          navClickArrived = true;
+          return;
+        }
+      }
+      if (navigationTarget(event.target) !== null) toggleSidebar();
+    };
+    const onDrawerPointerUp = (event) => {
+      if (event.pointerType !== "touch" && event.pointerType !== "pen") return;
+      const target = navigationTarget(event.target);
       if (target === null) return;
-      const drawer = document.querySelector('[data-mobile-nav="frame"] > :first-child');
-      if (drawer === null || !drawer.contains(target)) return;
-      if (target.closest('[class*="sessionRow"] button') !== null) return;
-      const navigates = target.closest(
-        'button[data-dsh-taskboard-entry], button[data-dsh-ssh-entry], [class*="newSession"], [class*="sessionRow"], [class*="searchResultRow"], [class*="searchResultWorkspace"], [data-mobile-nav="files"]'
-      );
-      if (navigates !== null) toggleSidebar();
+      const row = target.closest('[role="treeitem"]');
+      if (row !== null) {
+        if (row.getAttribute("aria-selected") === "true") {
+          suppressTouchClickUntil = performance.now() + 500;
+          toggleSidebar();
+        } else {
+          lastTouchNavAt = performance.now();
+          lastTouchX = event.clientX;
+          lastTouchY = event.clientY;
+          armNav(row);
+        }
+        return;
+      }
     };
     document.addEventListener("click", onDrawerClick, true);
-    return () => document.removeEventListener("click", onDrawerClick, true);
+    document.addEventListener("pointerup", onDrawerPointerUp, true);
+    return () => {
+      disarmNav();
+      document.removeEventListener("click", onDrawerClick, true);
+      document.removeEventListener("pointerup", onDrawerPointerUp, true);
+    };
   }, [mobile, open, toggleSidebar]);
   (0, import_react.useEffect)(() => {
     if (!mobile || !open) return;
@@ -219,8 +343,11 @@ function MobileNavOverlay({ toggleSidebar, t }) {
       if (document.querySelector('[aria-modal="true"]') !== null) return;
       const target = event.target;
       if (target === null) return;
-      if (target.closest('[data-mobile-nav="toggle"]') !== null) return;
-      const drawer = document.querySelector('[data-mobile-nav="frame"] > :first-child');
+      if (target.closest(TOGGLE_SELECTOR) !== null) return;
+      if (isOverlayTap(target)) return;
+      const frame = document.querySelector('[data-mobile-nav="frame"]');
+      if (frame === null || frame.hasAttribute("data-sidebar-collapsed")) return;
+      const drawer = document.querySelector(DRAWER_SELECTOR);
       if (drawer !== null && drawer.contains(target)) return;
       toggleSidebar();
     };
@@ -275,6 +402,169 @@ function MobileDrawerFooter({ useSessions, downloadSessionLog, toggleSidebar, t 
     /* @__PURE__ */ React.createElement(import_dsh_client_ui_primitives3.IconDownloadOutline16, { size: 14 }),
     /* @__PURE__ */ React.createElement("span", null, t("sessionLog"))
   ));
+}
+
+// client/mobile/fileGuard.ts
+var GUARD_MSG = "\u624B\u673A\u4E0A\u65E0\u6CD5\u76F4\u63A5\u6253\u5F00\u7535\u8111\u4E0A\u7684\u6587\u4EF6";
+var WS_LABELS = ["\u6DFB\u52A0\u5DE5\u4F5C\u533A", "\u6DFB\u52A0\u5DE5\u4F5C\u533A\u2026", "Add workspace", "Add workspace\u2026"];
+var COPY_LABEL = "\u590D\u5236";
+function looksLikeFilePath(text) {
+  const t = (text ?? "").trim();
+  if (t.length < 3 || t.length > 320) return false;
+  if (/^(\/|~\/|\.\.?\/|[A-Za-z]:\\)/.test(t)) return true;
+  if (/\/[\w.\-]+\.\w{1,12}$/.test(t)) return true;
+  if (/[\w.\-]+\/[\w.\-]+\.\w{1,12}/.test(t)) return true;
+  return false;
+}
+async function copyText(text) {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+  }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.top = "-9999px";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    const okCopy = document.execCommand("copy");
+    ta.remove();
+    return okCopy;
+  } catch {
+    return false;
+  }
+}
+function startFileGuard(readFile) {
+  let toastEl = null;
+  let toastTimer = null;
+  const showToast = (text) => {
+    if (toastEl === null) {
+      toastEl = document.createElement("div");
+      toastEl.setAttribute("data-mobile-nav", "file-guard-toast");
+      Object.assign(toastEl.style, {
+        position: "fixed",
+        left: "50%",
+        bottom: "64px",
+        transform: "translateX(-50%)",
+        maxWidth: "84vw",
+        zIndex: "9999",
+        padding: "10px 14px",
+        borderRadius: "10px",
+        background: "rgba(20,22,28,.92)",
+        color: "#fff",
+        fontSize: "13px",
+        lineHeight: "1.4",
+        textAlign: "center",
+        fontFamily: "inherit",
+        boxShadow: "0 4px 16px rgba(0,0,0,.28)",
+        pointerEvents: "none",
+        opacity: "0",
+        transition: "opacity .18s ease"
+      });
+      document.body.appendChild(toastEl);
+    }
+    toastEl.textContent = text;
+    requestAnimationFrame(() => {
+      if (toastEl !== null) toastEl.style.opacity = "1";
+    });
+    if (toastTimer !== null) window.clearTimeout(toastTimer);
+    toastTimer = window.setTimeout(() => {
+      if (toastEl !== null) toastEl.style.opacity = "0";
+    }, 2600);
+  };
+  const onClick = (event) => {
+    const target = event.target;
+    if (target === null) return;
+    const el = target.closest("button, a");
+    if (el === null) return;
+    if (!looksLikeFilePath(el.textContent)) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    showToast(GUARD_MSG);
+  };
+  document.addEventListener("click", onClick, true);
+  const injectCopyButtons = () => {
+    const links = document.querySelectorAll("button, a");
+    links.forEach((el) => {
+      if (el.getAttribute("data-mobile-nav-copy") === "1") return;
+      const txt = (el.textContent ?? "").trim();
+      if (!looksLikeFilePath(txt)) return;
+      el.setAttribute("data-mobile-nav-copy", "1");
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.setAttribute("data-mobile-nav", "copy-file");
+      btn.textContent = COPY_LABEL;
+      btn.addEventListener("click", async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const filePath = (el.textContent ?? "").trim();
+        btn.disabled = true;
+        btn.textContent = "\u2026";
+        try {
+          const res = await readFile(filePath);
+          if (!res?.ok) {
+            showToast(res?.error?.message ?? "\u590D\u5236\u5931\u8D25");
+            return;
+          }
+          const content = res.value?.content ?? "";
+          const copied = await copyText(content);
+          if (copied) {
+            const kb = Math.max(1, Math.round((res.value?.size ?? content.length) / 1024));
+            showToast(`\u5DF2\u590D\u5236\u6587\u4EF6\u5185\u5BB9\uFF08${kb} KB\uFF09`);
+          } else {
+            showToast("\u590D\u5236\u5931\u8D25\uFF0C\u8BF7\u624B\u52A8\u9009\u62E9");
+          }
+        } catch (err) {
+          showToast(err instanceof Error ? err.message : "\u590D\u5236\u5931\u8D25");
+        } finally {
+          btn.disabled = false;
+          btn.textContent = COPY_LABEL;
+        }
+      });
+      el.parentElement?.insertBefore(btn, el.nextSibling);
+    });
+  };
+  injectCopyButtons();
+  const copyObserver = new MutationObserver(() => injectCopyButtons());
+  copyObserver.observe(document.body, { childList: true, subtree: true });
+  const hideWsEntries = () => {
+    const checkOne = (node) => {
+      if (node.nodeType !== 1) return;
+      const el = node;
+      const txt = (el.getAttribute("aria-label") ?? el.textContent ?? "").trim();
+      if (WS_LABELS.includes(txt)) {
+        el.style.display = "none";
+        el.setAttribute("data-mobile-nav-hide", "add-workspace");
+      }
+    };
+    const sel = '[role="menuitem"],[role="option"],li,button,a';
+    document.querySelectorAll(sel).forEach(checkOne);
+    const observer = new MutationObserver((mutations) => {
+      for (const m of mutations) {
+        m.addedNodes.forEach((n) => {
+          if (n.nodeType !== 1) return;
+          checkOne(n);
+          n.querySelectorAll?.(sel).forEach(checkOne);
+        });
+      }
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    return () => observer.disconnect();
+  };
+  const disconnectWs = hideWsEntries();
+  return () => {
+    document.removeEventListener("click", onClick, true);
+    copyObserver.disconnect();
+    disconnectWs();
+    if (toastTimer !== null) window.clearTimeout(toastTimer);
+    toastEl?.remove();
+  };
 }
 
 // client/mobile/mobile.css.ts
@@ -475,14 +765,19 @@ var MOBILE_CSS = `
      it to 500), and when the layer outranks the drawer, the backdrop paints
      ABOVE the drawer and swallows every tap \u2014 the drawer opens but no row
      can be pressed (every tap just closes it). The drawer must therefore
-     outrank any such raise: 600 clears the known 500 while staying under the
-     fixed-position banners/toasts (z 9999) that float at the viewport level. */
+     outrank any such raise.
+     1200 (was 600) clears the mobile layers shipped by
+     @linxin666/dsh-web-ui-all \u2014 its sidebar pane is z-index 1100, its
+     details pane 1000 and its full-screen frame ::after mask 1050 (issue
+     #67: that mask sat on top of the 600 drawer and ate every tap). Still
+     far under the fixed-position banners/toasts (z 9999) that float at the
+     viewport level. */
   [data-mobile-nav="frame"] > :first-child {
     position: absolute !important;
     inset: 0 auto 0 0 !important;
     width: max-content !important;
     max-width: 92vw !important;
-    z-index: 600 !important;
+    z-index: 1200 !important;
     transform: translateX(-110%);
     transition: transform .28s var(--ds-ease-in-out, ease-in-out);
     background: var(--dsw-alias-bg-base, #ffffff);
@@ -509,6 +804,32 @@ var MOBILE_CSS = `
      viewport-anchored: it dims the full screen and the sheet sits at left:8. */
   [data-mobile-nav="frame"]:not([data-sidebar-collapsed]) > :first-child {
     transform: none !important;
+  }
+
+  /* Kill a competing full-screen mask (issue #67).
+     @linxin666/dsh-web-ui-all ships its own mobile drawer, and part of it is
+
+       [data-dsh-frame]:not([data-sidebar-collapsed])::after {
+         content: ""; position: fixed; inset: 0; z-index: 1050;
+         background: rgb(0 0 0 / 24%);
+       }
+
+     The pseudo-element belongs to the frame we already mark, and the frame
+     carries only "position: relative" with z-index auto \u2014 no stacking context
+     \u2014 so this mask competes with the drawer in the parent stacking context
+     and, at 1050, paints over it. It covers the whole viewport, so every tap
+     on a session row lands on the mask instead: the drawer opens but nothing
+     inside it can be pressed, and the page behind cannot be scrolled.
+     Removing it is safe: the mobile stylesheet already renders its own
+     backdrop, and tapping outside the drawer is handled in JS.
+
+     The attribute selector is repeated on purpose. Their rule has the same
+     specificity (0,2,1) once ours is written the obvious way, and plugin
+     stylesheets are injected in load order, so a tie would be decided by
+     whichever plugin happened to load last. Doubling the attribute makes it
+     (0,3,1) and deterministic. */
+  [data-mobile-nav="frame"][data-mobile-nav="frame"]:not([data-sidebar-collapsed])::after {
+    content: none !important;
   }
 
   /* Drag handles are useless on touch and would float over the drawer. */
@@ -567,26 +888,77 @@ var MOBILE_CSS = `
     font-size: 15px !important;
   }
 
+  /* Keep DSH's own process disclosures and their expand/collapse behaviour,
+     but remove desktop-sized vertical breathing room between consecutive
+     context, Skill, and system-prompt entries. */
+  [data-phase] [data-turn-process] {
+    height: 28px !important;
+    padding-bottom: 4px !important;
+    margin-bottom: 4px !important;
+  }
+  [data-phase] [data-turn-process][data-open] {
+    margin-bottom: 4px !important;
+  }
+  [data-phase] [data-disclosure-row] {
+    min-height: 24px !important;
+  }
+  [data-phase] :is([data-context-injection-body], [data-system-prompt-body]) {
+    margin-top: 2px !important;
+  }
+
   /* --- Composer bottom row on mobile ---
-     The official row gives the model pill (trailing) flex:0 0 auto, which
-     squeezes the agent-permission pill (modes) down to 15px: the pill's
-     chevron then overflows on top of the model name. Let the permission
-     pill keep its natural width and let the model pill shrink instead.
-     Anchored by the composer card (:has(textarea)): row = last child,
-     tools = first child, permission pill = its 2nd child, model pill =
-     row's last child. */
-  [data-phase] [class*="_card"]:has(textarea) > :last-child {
+     Keep add, permission, model, reasoning and send controls on one line at
+     the Honor 50's 360px CSS viewport. DSH's stable data-composer-card hook
+     survives the editor's textarea -> contenteditable migration. */
+  [data-phase] [data-composer-card="true"] > [class$="_row"] {
+    flex-wrap: nowrap !important;
+    gap: 6px !important;
+  }
+  [data-phase] [data-composer-card="true"] > [class$="_row"] > :first-child {
     gap: 8px !important;
-  }
-  [data-phase] [class*="_card"]:has(textarea) > :last-child > :first-child {
-    gap: 8px !important;
-  }
-  [data-phase] [class*="_card"]:has(textarea) > :last-child > :first-child > :nth-child(2) {
-    flex: 0 0 auto !important;
-  }
-  [data-phase] [class*="_card"]:has(textarea) > :last-child > :last-child {
-    flex: 1 1 auto !important;
     min-width: 0 !important;
+  }
+  [data-phase] [data-composer-card="true"] > [class$="_row"] > :first-child > :nth-child(2) {
+    flex: 0 1 auto !important;
+    min-width: 0 !important;
+  }
+  [data-phase] [data-composer-card="true"] > [class$="_row"] > :last-child {
+    flex: 1 1 0 !important;
+    min-width: 0 !important;
+    gap: 6px !important;
+  }
+
+  /* --- Composer popups as bottom sheets on mobile ---
+     Two composer-anchored popups break on phones (field: bottom + side
+     cut, only part of the popup visible):
+     1. the model pill menu ([role=menu], max 360px, opens upward from the
+        pill inside the composer card);
+     2. the "/" command palette (max 320px card with the search box \u2014 it
+        hosts the /model popupSelect list: search + provider-grouped rows).
+     Both are position:absolute INSIDE the conversation scrollBody
+     (overflow:hidden) and the shell center column (overflow:hidden), so
+     the scroll containers clip them mid-list. Forensics showed neither
+     layer creates a containing block (no transform/contain/will-change),
+     so on mobile we snap whichever popup is open to a viewport-anchored
+     sheet: fixed positioning escapes the scroll clip entirely, width is
+     deterministic, safe-area keeps it off the gesture bar. A transient
+     picker covering the composer is standard mobile UX; selection or an
+     outside tap still dismisses it. */
+  [data-phase] [class$="_root"]:has(> [aria-haspopup="menu"]) > [role="menu"],
+  [data-phase] [class$="_card"]:has(> [class$="_search"]) {
+    position: fixed !important;
+    left: 12px !important;
+    right: 12px !important;
+    top: auto !important;
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 12px) !important;
+    width: auto !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    max-height: min(65vh, 480px) !important;
+    max-height: min(65dvh, 480px) !important;
+    z-index: 130 !important;
+    border-radius: 14px !important;
+    box-shadow: 0 -4px 28px rgba(0, 0, 0, .18) !important;
   }
 
   /* --- Session header on mobile ---
@@ -597,14 +969,22 @@ var MOBILE_CSS = `
        header > :first-child                   titleRow (titleCluster + utilities)
        header > :first-child > :last-child     headerUtilities (Session log seat) */
   [data-phase] header {
-    padding-right: 12px !important;
+    padding: 8px 12px 0 !important;
   }
-  /* Give the title row a lane clear of the absolutely-placed toggle, then
-     balance the header: with header padding-right 12px, a 20px left
-     padding puts the title's geometric center exactly on the viewport
-     center (measured 195/195 at 390px). */
+  /* The directory and Files controls are absolutely positioned, so reserve
+     their lanes and let the title use the remaining width without squeezing. */
   [data-phase] header > :first-child {
-    padding-left: 20px !important;
+    min-height: 36px !important;
+    padding: 0 32px !important;
+  }
+  [data-phase] header [class$="_titleCluster"],
+  [data-phase] header [class$="_crumbs"] {
+    min-width: 0 !important;
+  }
+  [data-phase] header button[class*="_crumb"] {
+    max-width: calc(100vw - 104px) !important;
+    padding-left: 0 !important;
+    padding-right: 0 !important;
   }
   /* The directory toggle sits at the far left of the header (the header
      is position:relative; the data-slot wrappers are display:contents). */
@@ -1106,6 +1486,48 @@ var MOBILE_CSS = `
   [data-phase="hero"] [class$="_stack"] {
     gap: 0 !important;
   }
+
+  /* ---------- \u9690\u85CF\u300C\u6DFB\u52A0\u5DE5\u4F5C\u533A\u300D\u5165\u53E3\uFF08\u624B\u673A\u4E0A\u914D\u5DE5\u4F5C\u533A\u65E0\u610F\u4E49\uFF0Cissue #17 \u4FEE\u6B63\uFF09 ----------
+     \u56FE\u6807\u6309\u94AE\u7684 aria-label \u968F\u8BED\u8A00\u53D8\u5316\uFF08zh\u300C\u6DFB\u52A0\u5DE5\u4F5C\u533A\u300D/ en\u300CAdd workspace\u300D\uFF09\uFF0C
+     \u4E24\u79CD\u90FD\u8986\u76D6\uFF1B\u4E0B\u62C9\u83DC\u5355\u91CC\u7684\u300C\u6DFB\u52A0\u5DE5\u4F5C\u533A\u2026\u300D\u9879\u7531 fileGuard.ts \u7684 MutationObserver
+     \u6309\u6587\u6848\u515C\u5E95\u9690\u85CF\uFF08CSS \u9009\u4E0D\u5230\u7EAF\u6587\u672C\u8282\u70B9\uFF09\u3002\u53EA\u5728\u7A84\u5C4F\u751F\u6548\u2014\u2014\u684C\u9762\u7AEF\u7167\u5E38\u4FDD\u7559\u3002 */
+  button[aria-label="\u6DFB\u52A0\u5DE5\u4F5C\u533A"],
+  button[aria-label="\u6DFB\u52A0\u5DE5\u4F5C\u533A\u2026"],
+  button[aria-label="Add workspace"],
+  button[aria-label="Add workspace\u2026"] {
+    display: none !important;
+  }
+
+  /* ---------- \u6587\u4EF6\u94FE\u63A5\u65C1\u7684\u300C\u590D\u5236\u300D\u6309\u94AE\uFF08issue #17\uFF1A\u590D\u5236\u6587\u4EF6\u5185\u5BB9\uFF09 ----------
+     \u6302\u5728\u5BF9\u8BDD\u91CC\u7684\u6587\u4EF6\u94FE\u63A5\uFF08<button>/<a>\uFF0C\u6587\u6848\u5373\u8DEF\u5F84\uFF09\u7D27\u90BB\u4F4D\u7F6E\uFF0C\u7531 fileGuard.ts
+     \u6CE8\u5165\u3002\u53EA\u5C4F\u5185\u53EF\u89C1\uFF1A\u684C\u9762\u7AEF\u4E0D\u6CE8\u5165\u3001\u4E0D\u663E\u793A\uFF1B\u8FD9\u91CC\u518D\u515C\u5E95\u4E00\u5C42\uFF0C\u907F\u514D\u4EFB\u4F55\u9057\u6F0F\u3002
+     \u6587\u4EF6\u94FE\u63A5\u591A\u4E3A inline\uFF0C\u6309\u94AE\u7528 inline-flex \u7D27\u8DDF\u5176\u540E\u5373\u53EF\u3002 */
+  [data-mobile-nav="copy-file"] {
+    display: inline-flex !important;
+    align-items: center;
+    justify-content: center;
+    margin-left: 6px !important;
+    vertical-align: baseline !important;
+    height: 22px !important;
+    padding: 0 8px !important;
+    border: 1px solid var(--dsw-alias-border-l1, rgba(0, 0, 0, .14)) !important;
+    border-radius: 6px !important;
+    background: var(--dsw-alias-bg-layer-1, #fff) !important;
+    color: var(--dsw-alias-label-primary, inherit) !important;
+    font-family: inherit !important;
+    font-size: 11px !important;
+    line-height: 1 !important;
+    cursor: pointer !important;
+    -webkit-tap-highlight-color: transparent !important;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, .12) !important;
+  }
+  [data-mobile-nav="copy-file"]:active {
+    background: var(--dsw-alias-interactive-bg-hover, rgba(0, 0, 0, .06)) !important;
+  }
+  [data-mobile-nav="copy-file"][disabled] {
+    opacity: .55 !important;
+    cursor: default !important;
+  }
 }
 
 /* ---------- desktop: the mobile controls must never appear ---------- */
@@ -1121,6 +1543,7 @@ var MOBILE_CSS = `
     display: none !important;
   }
 }
+
 `;
 
 // client/mobile/locales.ts
@@ -1140,8 +1563,44 @@ var en = {
   "files": "Files"
 };
 
+// client/mobile/layout-mode.mjs
+function resolveLayout({ urlValue, stored, narrowMatch }) {
+  const url = String(urlValue ?? "").trim();
+  if (url === "desktop") return "desktop";
+  if (url === "mobile") return "mobile";
+  if (stored === "desktop" || stored === "mobile") return stored;
+  return narrowMatch ? "mobile" : "desktop";
+}
+function persistLayoutFromUrl(urlValue) {
+  if (typeof localStorage === "undefined") return "";
+  const v = String(urlValue ?? "").trim();
+  try {
+    if (v === "desktop" || v === "mobile") localStorage.setItem("dsh-pocket.layout", v);
+    else if (v === "auto" || v === "") localStorage.removeItem("dsh-pocket.layout");
+  } catch {
+  }
+  try {
+    const s = localStorage.getItem("dsh-pocket.layout");
+    return s === "desktop" || s === "mobile" ? s : "";
+  } catch {
+    return "";
+  }
+}
+
 // client/mobile/mobile-apply.tsx
 function mobileApply(ctx) {
+  const urlValue = new URL(window.location.href).searchParams.get("dsh-layout") ?? "";
+  const narrowMQ = window.matchMedia("(max-width: 1023px)");
+  const stored = persistLayoutFromUrl(urlValue);
+  const layout = resolveLayout({ urlValue, stored, narrowMatch: narrowMQ.matches });
+  document.body?.setAttribute("data-dsh-pocket-layout", layout);
+  if (layout === "desktop") return;
+  let narrow = narrowMQ;
+  if (layout === "mobile") {
+    narrow = { matches: true, addEventListener: () => {
+    }, removeEventListener: () => {
+    } };
+  }
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), "dsh-mobile-nav: dictionaries");
   ctx.effect(() => {
     const tag = document.createElement("style");
@@ -1154,7 +1613,6 @@ function mobileApply(ctx) {
     };
   }, "dsh-mobile-nav: styles");
   ctx.effect(() => {
-    const narrow = window.matchMedia("(max-width: 1023px)");
     const viewport = document.querySelector('meta[name="viewport"]');
     const originalViewport = viewport?.content ?? "";
     const themeMeta = document.createElement("meta");
@@ -1186,7 +1644,6 @@ function mobileApply(ctx) {
     };
   }, "dsh-mobile-nav: status bar theme + viewport + zoom guard");
   ctx.effect(() => {
-    const narrow = window.matchMedia("(max-width: 1023px)");
     if (!narrow.matches) return () => {
     };
     const onChevronClick = (event) => {
@@ -1198,7 +1655,6 @@ function mobileApply(ctx) {
     return () => document.removeEventListener("click", onChevronClick, true);
   }, "dsh-mobile-nav: aionui explorer close marker");
   ctx.effect(() => {
-    const narrow = window.matchMedia("(max-width: 1023px)");
     if (!narrow.matches) return () => {
     };
     const frame = () => document.querySelector('[data-mobile-nav="frame"]');
@@ -1216,7 +1672,6 @@ function mobileApply(ctx) {
     };
   }, "dsh-mobile-nav: explorer availability (issue #48)");
   ctx.effect(() => {
-    const narrow = window.matchMedia("(max-width: 1023px)");
     if (!narrow.matches) return () => {
     };
     const frame = () => document.querySelector('[data-mobile-nav="frame"]');
@@ -1241,7 +1696,6 @@ function mobileApply(ctx) {
     };
   }, "dsh-mobile-nav: preview sheet open marker");
   ctx.effect(() => {
-    const narrow = window.matchMedia("(max-width: 1023px)");
     if (!narrow.matches) return () => {
     };
     const moveTps = (stats) => {
@@ -1257,11 +1711,10 @@ function mobileApply(ctx) {
       }
     };
     const mark = () => {
-      for (const root of document.querySelectorAll('[data-phase] [class$="_root"]')) {
-        if (root.closest('[class$="_composerStack"]') === null) continue;
+      const selector = '[data-phase] [data-slot="conversation.composer.dock"] [class$="_root"]';
+      for (const root of document.querySelectorAll(selector)) {
         const text = root.textContent ?? "";
         if (!/(turns|steps|\bLLM\b|轮|步)/.test(text)) continue;
-        if (root.querySelector("textarea") !== null) continue;
         root.setAttribute("data-mobile-nav", "stats");
         moveTps(root);
         return;
@@ -1275,7 +1728,6 @@ function mobileApply(ctx) {
     };
   }, "dsh-mobile-nav: stats line marker");
   ctx.effect(() => {
-    const narrow = window.matchMedia("(max-width: 1023px)");
     if (!narrow.matches) return () => {
     };
     const cols = ["[data-aionui-explorer-col]", "[data-aionui-preview-col]"];
@@ -1306,6 +1758,31 @@ function mobileApply(ctx) {
       observer.disconnect();
     };
   }, "dsh-mobile-nav: sheet rise animation replay");
+  ctx.effect(() => {
+    if (!narrow.matches) return () => {
+    };
+    const getWorkspaceCwd = () => {
+      try {
+        const ws = ctx.get?.("workspaces") ?? ctx.workspaces;
+        const list = ws?.list;
+        const arr = Array.isArray(list) ? list : list && typeof list === "object" && "value" in list ? list.value : null;
+        if (Array.isArray(arr)) {
+          for (const w of arr) {
+            const c = w?.cwd ?? w?.root;
+            if (typeof c === "string" && c) return c;
+          }
+        }
+      } catch {
+      }
+      return "";
+    };
+    const readFile = (filePath) => ctx.connection.rpc.call(
+      POCKET_RPC_CHANNEL,
+      POCKET_ENDPOINTS.fileRead,
+      { path: filePath, cwd: getWorkspaceCwd() }
+    );
+    return startFileGuard(readFile);
+  }, "dsh-mobile-nav: file open guard + copy button + hide add-workspace (issue #17)");
   ctx.slots.inject("conversation.session.header.actions", () => ctx.slots.register({
     name: "conversation.session.header.actions",
     id: "mobile-nav-toggle",
@@ -1363,6 +1840,19 @@ var zh2 = {
   "updatedRestartDetail": "\u2705 \u5DF2\u66F4\u65B0\uFF0C\u91CD\u542F dsh web \u751F\u6548",
   "updateFailed": "\u274C \u5931\u8D25\uFF1A{err}\uFF08\u624B\u52A8\u66F4\u65B0\uFF1Adsh plugin --profile web update dsh-pocket --latest -w\uFF09",
   "versionRange": "\u5F53\u524D v{cur} \u2192 \u6700\u65B0 v{latest}",
+  "wanAccess": "\u516C\u7F51\u8BBF\u95EE",
+  "pinLabel": "\u8BBF\u95EE\u5BC6\u7801",
+  "modeLabel": "\u5730\u5740\u6A21\u5F0F",
+  "advAddress": "\u9AD8\u7EA7 \xB7 \u624B\u52A8\u9009\u5730\u5740",
+  "wanOffHint": "\u5F00\u542F\u540E\u53EF\u4ECE\u4EFB\u4F55\u7F51\u7EDC\u8BBF\u95EE\uFF08\u6BCF\u6B21\u5F00\u542F\u9700\u786E\u8BA4\u514D\u8D23\u58F0\u660E\uFF09",
+  "resetFactory": "\u{1F9F9} \u6062\u590D\u51FA\u5382\u8BBE\u7F6E",
+  "resetGo": "\u6062\u590D",
+  "resetIntro": "\u8BBE\u7F6E\u641E\u51FA\u95EE\u9898\u65F6\u7684\u4E34\u65F6\u515C\u5E95\uFF1A\u6E05\u7A7A\u672C\u673A\u914D\u7F6E\u5E76\u91CD\u8BBE\u968F\u673A\u5BC6\u7801\uFF08DSH \u7684\u4F1A\u8BDD\u3001\u6A21\u578B\u3001\u63D2\u4EF6\u914D\u7F6E\u4E0D\u53D7\u5F71\u54CD\uFF09",
+  "resetTitle": "\u26A0\uFE0F \u786E\u8BA4\u6062\u590D\u51FA\u5382\u8BBE\u7F6E\uFF1F",
+  "resetBody": "\u5C06\u6E05\u7A7A\u5E76\u6062\u590D\u9ED8\u8BA4\uFF1A\n\u2460 \u5F00\u5173\uFF1A\u5C40\u57DF\u7F51\u8BBF\u95EE=\u5F00\u3001\u8BBF\u95EE\u5BC6\u7801=\u5F00\u3001\u5C40\u57DF\u7F51\u5730\u5740=\u81EA\u52A8\n\u2461 \u516C\u7F51\uFF1A\u6A21\u5F0F\u56DE\u5230\u968F\u673A\u57DF\u540D\uFF0C\u6E05\u7A7A Tunnel Token \u4E0E\u56FA\u5B9A\u57DF\u540D\uFF0C\u5E76\u5173\u95ED\u6B63\u5728\u8FD0\u884C\u7684\u516C\u7F51\n\u2462 \u5BC6\u7801\uFF1A\u516C\u7F51\u548C\u5C40\u57DF\u7F51\u90FD\u6362\u6210\u65B0\u7684\u968F\u673A 8 \u4F4D\u5BC6\u7801\uFF08\u65E7\u5BC6\u7801\u7ACB\u5373\u4F5C\u5E9F\uFF0C\u624B\u673A\u9700\u91CD\u65B0\u8F93\u5165\uFF09\n\nDSH \u81EA\u8EAB\u7684\u4F1A\u8BDD\u3001\u6A21\u578B\u3001\u63D2\u4EF6\u914D\u7F6E\u4E0D\u53D7\u5F71\u54CD\uFF1B\u6B64\u64CD\u4F5C\u4E0D\u53EF\u64A4\u9500\u3002",
+  "resetConfirm": "\u786E\u8BA4\u6062\u590D",
+  "resetDone": "\u2705 \u5DF2\u6062\u590D\u51FA\u5382\u8BBE\u7F6E\uFF1A\u8BBE\u7F6E\u5DF2\u6E05\u7A7A\uFF0C\u5BC6\u7801\u5DF2\u6362\u65B0\uFF08\u624B\u673A\u9700\u91CD\u65B0\u8F93\u5165\uFF09",
+  "resetFailed": "\u274C \u6062\u590D\u5931\u8D25\uFF0C\u8BF7\u91CD\u8BD5",
   "lanTitle": "\u{1F4F6} \u5C40\u57DF\u7F51\uFF08\u540C\u4E00 WiFi\uFF09",
   "lanHint": "\u624B\u673A\u8FDE\u63A5\u540C\u4E00 WiFi \u540E\u626B\u7801\u5373\u53EF\u6253\u5F00",
   "lanAccess": "\u5C40\u57DF\u7F51\u8BBF\u95EE",
@@ -1374,7 +1864,6 @@ var zh2 = {
   "confirm": "\u786E\u5B9A",
   "lanAddress": "\u5C40\u57DF\u7F51\u5730\u5740",
   "lanAddressAuto": "\u81EA\u52A8\uFF08\u63A8\u8350\uFF09",
-  "lanAddressHint": "\u9AD8\u7EA7\u9009\u9879\uFF1A\u4E00\u822C\u4E0D\u9700\u8981\u4FEE\u6539\uFF1B\u4F7F\u7528 Tailscale/VPN \u7B49\u8FDC\u7A0B\u8BBF\u95EE\u65F6\u53EF\u624B\u52A8\u9009\u62E9",
   "lanPin": "\u5C40\u57DF\u7F51\u8BBF\u95EE\u5BC6\u7801",
   "on": "\u5F00",
   "off": "\u5173",
@@ -1382,10 +1871,10 @@ var zh2 = {
   "lanPinCustomValue": "\u{1F510} \u8BBF\u95EE\u5BC6\u7801\uFF1A{pin}\uFF08\u81EA\u5B9A\u4E49\uFF1B\u624B\u673A\u6253\u5F00\u9700\u8F93\u5165\uFF09",
   "refresh": "\u5237\u65B0",
   "customize": "\u81EA\u5B9A\u4E49",
-  "customizing": "\u65B0\u5BC6\u7801\uFF088 \u4F4D\u6570\u5B57\uFF09\uFF1A",
+  "customizing": "\u65B0\u5BC6\u7801\uFF088 \u4F4D\uFF0C\u82F1\u6587\u5B57\u6BCD\u6216\u6570\u5B57\uFF09\uFF1A",
   "save": "\u4FDD\u5B58",
   "cancel": "\u53D6\u6D88",
-  "pinInvalid": "\u5BC6\u7801\u5FC5\u987B\u662F 8 \u4F4D\u6570\u5B57",
+  "pinInvalid": "\u5BC6\u7801\u5FC5\u987B\u662F 8 \u4F4D\u82F1\u6587\u5B57\u6BCD\u6216\u6570\u5B57",
   "pinCustomHint": "\u81EA\u5B9A\u4E49\u540E\u5F00\u542F\u516C\u7F51\u4E0D\u518D\u81EA\u52A8\u6362\u65B0",
   "lanPinOff": "\u{1F513} \u5BC6\u7801\u5DF2\u5173\u95ED\uFF1A\u626B\u7801\u76F4\u8FDE\uFF0C\u65E0\u9700\u5BC6\u7801\uFF08\u4EC5\u540C\u4E00\u5C40\u57DF\u7F51\u8BBE\u5907\u53EF\u8BBF\u95EE\uFF1B\u516C\u7F51\u4ECD\u8981\u5BC6\u7801\uFF09",
   "lanStarting": "\u4EE3\u7406\u672A\u5C31\u7EEA\u2026",
@@ -1393,9 +1882,24 @@ var zh2 = {
   "wanHint": "\u4EFB\u4F55\u7F51\u7EDC\u626B\u7801\u5373\u7528\uFF08URL \u6BCF\u6B21\u91CD\u542F\u81EA\u52A8\u6362\u65B0\uFF09",
   "wanPin": "\u{1F510} \u8BBF\u95EE\u5BC6\u7801\uFF1A{pin}\uFF08\u6BCF\u6B21\u5F00\u542F\u516C\u7F51\u53D8\u65B0\uFF1B\u624B\u673A\u6253\u5F00\u94FE\u63A5\u9700\u8F93\u5165\u6B64\u5BC6\u7801\uFF09",
   "wanPinCustom": "\u{1F510} \u8BBF\u95EE\u5BC6\u7801\uFF1A{pin}\uFF08\u81EA\u5B9A\u4E49\uFF0C\u5F00\u542F\u516C\u7F51\u4E0D\u518D\u81EA\u52A8\u6362\u65B0\uFF09",
+  "wanEphemeralWarn": "\u26A0\uFE0F \u516C\u7F51\u94FE\u63A5\u4EC5\u5728\u672C\u6B21\u5F00\u542F\u671F\u95F4\u6709\u6548\uFF1A\u5173\u95ED\u6216\u91CD\u542F\u540E\u5931\u6548\uFF0C\u5E76\u53EF\u80FD\u88AB\u4ED6\u4EBA\u590D\u7528\u4E3A\u964C\u751F\u7F51\u7AD9\u3002\u8BF7\u52FF\u6536\u85CF\uFF0C\u6BCF\u6B21\u4ECE\u672C\u9875\u626B\u300C\u5F53\u524D\u300D\u4E8C\u7EF4\u7801\u3002\u9700\u8981\u56FA\u5B9A\u4E0D\u53D8\u7684\u5730\u5740\u8BF7\u7528\u4E0B\u65B9\u300C\u56FA\u5B9A\u57DF\u540D\u300D\u3002",
   "stopTunnel": "\u5173\u95ED\u516C\u7F51",
   "enable": "\u5F00\u542F\u516C\u7F51\u8BBF\u95EE",
   "opening": "\u5F00\u542F\u4E2D\u2026",
+  "tunnelMode": "\u516C\u7F51\u6A21\u5F0F\uFF1A",
+  "modeQuick": "\u968F\u673A\u57DF\u540D\uFF08\u9ED8\u8BA4\uFF09",
+  "modeNamed": "\u56FA\u5B9A\u57DF\u540D",
+  "namedSummary": "\u56FA\u5B9A\u57DF\u540D\uFF1A{host} \xB7 Token {token}",
+  "namedTokenSet": "\u5DF2\u914D\u7F6E",
+  "namedTokenMissing": "\u672A\u914D\u7F6E",
+  "namedEdit": "\u4FEE\u6539",
+  "namedHostnameLabel": "\u56FA\u5B9A\u57DF\u540D\uFF1A",
+  "namedTokenLabel": "Tunnel Token\uFF08\u7559\u7A7A = \u4FDD\u6301\u4E0D\u53D8\uFF09\uFF1A",
+  "namedHow": "\u5728 Cloudflare Zero Trust \u2192 Networks \u2192 Tunnels \u521B\u5EFA\u96A7\u9053\u5E76\u590D\u5236 Token\uFF1B\u628A\u57DF\u540D\u7684 Service \u6307\u5411 http://127.0.0.1:3081\uFF08\u4EE3\u7406\u7AEF\u53E3\uFF09\u3002\u5730\u5740\u56FA\u5B9A\uFF0C\u91CD\u542F\u4E0D\u518D\u53D8\u5316\u3002",
+  "namedSecurity": "\u56FA\u5B9A\u57DF\u540D\u957F\u671F\u66B4\u9732\u5728\u516C\u7F51\u3001\u66F4\u6613\u88AB\u626B\u63CF\uFF0C\u5EFA\u8BAE\u540C\u65F6\u8BBE\u7F6E\u81EA\u5B9A\u4E49\u5F3A\u5BC6\u7801\uFF08\u672C\u6A21\u5F0F\u516C\u7F51\u5BC6\u7801\u9ED8\u8BA4\u4E0D\u968F\u91CD\u542F\u8F6E\u6362\uFF09\u3002",
+  "namedNeedCfg": "\u8BF7\u5148\u586B\u5199\u56FA\u5B9A\u57DF\u540D\u4E0E Tunnel Token",
+  "namedRunningHint": "\u56FA\u5B9A\u57DF\u540D\uFF08Cloudflare \u547D\u540D\u96A7\u9053\uFF09\u2014\u2014\u5730\u5740\u4E0D\u968F\u91CD\u542F\u53D8\u5316",
+  "namedTakeEffect": "\u5DF2\u4FDD\u5B58\u56FA\u5B9A\u57DF\u540D\u914D\u7F6E\u2014\u2014\u9700\u5173\u95ED\u5E76\u91CD\u65B0\u5F00\u542F\u516C\u7F51\u8BBF\u95EE\u540E\u751F\u6548",
   "disclaimerTitle": "\u26A0\uFE0F \u5B89\u5168\u514D\u8D23\u58F0\u660E",
   "disclaimerBody": "\u5F00\u542F\u516C\u7F51 = \u628A\u672C\u673A DSH\uFF08\u80FD\u6267\u884C\u4EE3\u7801\uFF09\u66B4\u9732\u5230\u4E92\u8054\u7F51\u3002\u4EFB\u4F55\u4EBA\u62FF\u5230\u516C\u7F51\u94FE\u63A5\u548C\u5BC6\u7801\uFF0C\u90FD\u80FD\u8BBF\u95EE\u751A\u81F3\u64CD\u4F5C\u4F60\u7684\u7535\u8111\u3002\u8BF7\u786E\u8BA4\uFF1A\u2460 \u4F7F\u7528\u81EA\u5B9A\u4E49\u5F3A\u5BC6\u7801\u6216\u59A5\u5584\u4FDD\u7BA1\u81EA\u52A8\u5BC6\u7801\uFF1B\u2461 \u7528\u5B8C\u7ACB\u5373\u300C\u5173\u95ED\u516C\u7F51\u300D\uFF1B\u2462 \u516C\u53F8/\u6D89\u5BC6\u7F51\u7EDC\u8BF7\u5148\u786E\u8BA4\u5408\u89C4\u3002",
   "disclaimerAgree": "\u6211\u5DF2\u77E5\u60C5\uFF0C\u540C\u610F\u5F00\u542F",
@@ -1432,6 +1936,19 @@ var en2 = {
   "updatedRestartDetail": "\u2705 Updated \u2014 restart dsh web to apply",
   "updateFailed": "\u274C Failed: {err} (manual update: dsh plugin --profile web update dsh-pocket --latest -w)",
   "versionRange": "Current v{cur} \u2192 latest v{latest}",
+  "wanAccess": "Public access",
+  "pinLabel": "Access PIN",
+  "modeLabel": "Address mode",
+  "advAddress": "Advanced \xB7 Pick address",
+  "wanOffHint": "Reachable from any network once enabled (a disclaimer is confirmed on each enable)",
+  "resetFactory": "\u{1F9F9} Factory reset",
+  "resetGo": "Reset",
+  "resetIntro": "Temporary fallback when settings break: clear local config and re-roll random PINs (DSH sessions, models and plugin config are untouched)",
+  "resetTitle": "\u26A0\uFE0F Confirm factory reset?",
+  "resetBody": "This clears and restores defaults:\n\u2460 Switches: LAN access on, access PIN on, LAN address auto\n\u2461 Public: mode back to random URL, Tunnel Token and fixed domain cleared, and any running tunnel is stopped\n\u2462 PINs: both public and LAN become new random 8-character PINs (old ones stop working; the phone must re-enter)\n\nYour DSH sessions, models and plugin config are untouched. This cannot be undone.",
+  "resetConfirm": "Reset",
+  "resetDone": "\u2705 Factory reset done: settings cleared and PINs re-rolled (re-enter the PIN on your phone)",
+  "resetFailed": "\u274C Reset failed \u2014 please retry",
   "lanTitle": "\u{1F4F6} LAN (same Wi-Fi)",
   "lanHint": "Scan to open once your phone is on the same Wi-Fi",
   "lanAccess": "LAN access",
@@ -1443,7 +1960,6 @@ var en2 = {
   "confirm": "Confirm",
   "lanAddress": "LAN address",
   "lanAddressAuto": "Auto (recommended)",
-  "lanAddressHint": "Advanced option: usually no change needed; select manually when accessing through Tailscale/VPN",
   "lanPin": "LAN access PIN",
   "on": "On",
   "off": "Off",
@@ -1451,10 +1967,10 @@ var en2 = {
   "lanPinCustomValue": "\u{1F510} PIN: {pin} (custom; required on the phone)",
   "refresh": "Refresh",
   "customize": "Customize",
-  "customizing": "New PIN (8 digits): ",
+  "customizing": "New PIN (8 chars, letters/digits): ",
   "save": "Save",
   "cancel": "Cancel",
-  "pinInvalid": "PIN must be exactly 8 digits",
+  "pinInvalid": "PIN must be exactly 8 characters (letters and digits only)",
   "pinCustomHint": "custom PINs are not rotated on tunnel start",
   "lanPinOff": "\u{1F513} PIN off \u2014 scan & go, no PIN (LAN devices only; public still requires PIN)",
   "lanStarting": "Proxy starting\u2026",
@@ -1462,9 +1978,24 @@ var en2 = {
   "wanHint": "Scan from any network (the URL changes on every restart)",
   "wanPin": "\u{1F510} PIN: {pin} (changes each time the tunnel is enabled; required on the phone)",
   "wanPinCustom": "\u{1F510} PIN: {pin} (custom \u2014 not rotated on tunnel start)",
+  "wanEphemeralWarn": '\u26A0\uFE0F The public link is valid only for this session: it stops working after you close or restart, and may be reused by someone else for an unrelated site. Do not bookmark it \u2014 scan the CURRENT QR code from this page each time. For a permanent address use "Fixed domain" below.',
   "stopTunnel": "Stop",
   "enable": "Enable anywhere",
   "opening": "Enabling\u2026",
+  "tunnelMode": "Mode:",
+  "modeQuick": "Random URL (default)",
+  "modeNamed": "Fixed domain",
+  "namedSummary": "Fixed domain: {host} \xB7 Token {token}",
+  "namedTokenSet": "configured",
+  "namedTokenMissing": "not set",
+  "namedEdit": "Edit",
+  "namedHostnameLabel": "Fixed domain:",
+  "namedTokenLabel": "Tunnel Token (blank = keep current):",
+  "namedHow": "Create a tunnel in Cloudflare Zero Trust \u2192 Networks \u2192 Tunnels and copy the token; point the hostname's Service at http://127.0.0.1:3081 (the proxy port). The URL stays fixed across restarts.",
+  "namedSecurity": "A fixed domain is long-lived and easier to scan \u2014 set a strong custom PIN too (the public PIN is not rotated on restart in this mode).",
+  "namedNeedCfg": "Set the fixed domain and Tunnel Token first",
+  "namedRunningHint": "Fixed domain (Cloudflare named tunnel) \u2014 the URL no longer changes on restart",
+  "namedTakeEffect": "Fixed-domain config saved \u2014 turn public access off and on again to take effect",
   "disclaimerTitle": "\u26A0\uFE0F Security disclaimer",
   "disclaimerBody": "Enabling public access exposes this computer\u2019s DSH (which can execute code) to the internet. Anyone with the public link and PIN can reach \u2014 and operate \u2014 your computer. Please confirm: \u2460 use a strong custom PIN or keep the auto-generated one safe; \u2461 turn public access OFF as soon as you\u2019re done; \u2462 on a corporate/classified network, confirm compliance first.",
   "disclaimerAgree": "I understand and agree",
@@ -1612,6 +2143,11 @@ function PocketSettingsTab({ rpcCall, t }) {
   const [disclaimerOpen, setDisclaimerOpen] = (0, import_react2.useState)(false);
   const [disclaimerChecked, setDisclaimerChecked] = (0, import_react2.useState)(false);
   const doStartTunnel = async () => {
+    const cfg = status?.tunnelConfig;
+    if (cfg?.mode === "named" && (!cfg.hostname || !cfg.tokenSet)) {
+      setError(t("namedNeedCfg"));
+      return;
+    }
     setBusy(true);
     setError(null);
     setTunnelState({ phase: "starting", detail: "\u6B63\u5728\u5F00\u542F\u2026", startedAt: Date.now() });
@@ -1636,6 +2172,45 @@ function PocketSettingsTab({ rpcCall, t }) {
     try {
       setStatus(await call(POCKET_ENDPOINTS.tunnelStop, {}));
     } catch {
+    }
+  };
+  const [tunnelCfg, setTunnelCfg] = (0, import_react2.useState)(null);
+  const switchToQuick = async () => {
+    try {
+      setStatus(await call(POCKET_ENDPOINTS.tunnelSetConfig, { mode: "quick" }));
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+  const saveNamedTunnel = async () => {
+    try {
+      setStatus(await call(POCKET_ENDPOINTS.tunnelSetConfig, {
+        mode: "named",
+        hostname: tunnelCfg?.hostname ?? "",
+        token: tunnelCfg?.token || void 0
+        // 留空不覆盖已存 Token
+      }));
+      setTunnelCfg(null);
+    } catch (err) {
+      setTunnelCfg((c) => ({ ...c, err: err.message }));
+    }
+  };
+  const [resetOpen, setResetOpen] = (0, import_react2.useState)(false);
+  const doFactoryReset = async () => {
+    setResetOpen(false);
+    setBusy(true);
+    setError(null);
+    try {
+      setStatus(await call(POCKET_ENDPOINTS.pocketReset, { confirm: true }));
+      setTunnelCfg(null);
+      setCustomPin(null);
+      setAdvOpen(false);
+      showToast(t("resetDone"));
+    } catch (err) {
+      setError(err.message);
+      showToast(t("resetFailed"));
+    } finally {
+      setBusy(false);
     }
   };
   const refreshLanPin = async () => {
@@ -1693,13 +2268,12 @@ function PocketSettingsTab({ rpcCall, t }) {
     { style: { marginTop: 6, fontSize: 12, color: "var(--dsw-alias-label-secondary,#6b7280)", lineHeight: 1.5 } },
     t("customizing"),
     (0, import_react2.createElement)("input", {
-      style: { width: 110, margin: "0 6px", padding: "4px 8px", fontSize: 14, letterSpacing: 2, textAlign: "center", border: "1px solid var(--dsw-alias-border-l2,#d1d5db)", borderRadius: 6, outline: "none" },
+      style: { width: 130, margin: "0 6px", padding: "4px 8px", fontSize: 14, letterSpacing: 1, textAlign: "center", border: "1px solid var(--dsw-alias-border-l2,#d1d5db)", borderRadius: 6, outline: "none" },
       type: "password",
-      inputMode: "numeric",
       maxLength: 8,
       value: customPin?.value ?? "",
       autoFocus: true,
-      onChange: (e) => setCustomPin((c) => ({ ...c, value: e.target.value.replace(/\D/g, ""), err: null })),
+      onChange: (e) => setCustomPin((c) => ({ ...c, value: e.target.value.replace(/[^a-zA-Z0-9]/g, ""), err: null })),
       onKeyDown: (e) => {
         if (e.key === "Enter") saveCustomPin(which);
         if (e.key === "Escape") setCustomPin(null);
@@ -1707,7 +2281,7 @@ function PocketSettingsTab({ rpcCall, t }) {
     }),
     (0, import_react2.createElement)("button", { style: { ...styles.btn, height: 26, padding: "0 10px", fontSize: 12, marginLeft: 2 }, onClick: () => saveCustomPin(which) }, t("save")),
     (0, import_react2.createElement)("button", { style: { ...styles.btn, height: 26, padding: "0 10px", fontSize: 12 }, onClick: () => setCustomPin(null) }, t("cancel")),
-    customPin?.err ? (0, import_react2.createElement)("div", { style: { color: "var(--dsw-alias-state-error-primary,#dc2626)", marginTop: 4 } }, customPin.err) : null
+    customPin?.err ? (0, import_react2.createElement)("div", { style: { color: "var(--dsw-alias-state-error-primary,#dc2626)", marginTop: 4 } }, errText(customPin.err)) : null
   );
   const customBtn = (which) => (0, import_react2.createElement)("button", { style: { ...styles.btn, height: 26, padding: "0 10px", fontSize: 12, marginLeft: 8 }, onClick: () => setCustomPin({ which, value: "", err: null }) }, t("customize"));
   const lanUrl = status?.lanUrl;
@@ -1716,6 +2290,57 @@ function PocketSettingsTab({ rpcCall, t }) {
   const tunnelStarting = ["downloading", "starting", "registering"].includes(tunnelPhase);
   const tunnelStateDetail = tunnelState?.detail ?? "";
   const tunnelStateStarted = tunnelState?.startedAt ?? null;
+  const tunnelModeView = status?.tunnelConfig ?? { mode: "quick", hostname: "", tokenSet: false };
+  const namedMode = tunnelModeView.mode === "named";
+  const namedActive = namedMode || tunnelCfg !== null;
+  const errText = (msg) => {
+    const s = String(msg ?? "");
+    const i = s.indexOf(" | ");
+    if (i < 0) return s;
+    return (t("ok") === zh2.ok ? s.slice(0, i) : s.slice(i + 3)).trim();
+  };
+  const [toast, setToast] = (0, import_react2.useState)(null);
+  const toastTimer = (0, import_react2.useRef)(null);
+  const showToast = (text) => {
+    setToast(text);
+    clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(null), 2600);
+  };
+  (0, import_react2.useEffect)(() => () => clearTimeout(toastTimer.current), []);
+  const modeBtnStyle = (active) => ({
+    ...styles.btn,
+    height: 28,
+    padding: "0 12px",
+    fontSize: 12,
+    fontWeight: active ? 600 : 400,
+    background: active ? "var(--dsw-alias-button-primary-fill, var(--dsw-alias-brand-primary,#4f6ef7))" : "var(--dsw-alias-bg-layer-1,#fff)",
+    color: active ? "var(--dsw-alias-label-primary-foreground, #fff)" : "var(--dsw-alias-label-primary,inherit)"
+  });
+  const Switch = (on, onClick) => (0, import_react2.createElement)("button", {
+    role: "switch",
+    "aria-checked": !!on,
+    style: { flexShrink: 0, width: 40, height: 22, borderRadius: 11, border: "none", padding: 0, position: "relative", cursor: "pointer", font: "inherit", background: on ? "var(--dsw-alias-button-primary-fill, var(--dsw-alias-brand-primary,#4f6ef7))" : "var(--dsw-alias-border-l2,#d1d5db)" },
+    onClick
+  }, (0, import_react2.createElement)("span", { style: { position: "absolute", top: 2, left: on ? 20 : 2, width: 18, height: 18, borderRadius: "50%", background: "#fff" } }));
+  const qrArea = (src, url, hint) => (0, import_react2.createElement)(
+    "div",
+    { style: { background: "var(--dsw-alias-bg-layer-2,#f3f4f6)", borderRadius: 10, padding: "10px 12px", textAlign: "center", margin: "10px 0" } },
+    (0, import_react2.createElement)("img", { src, alt: "QR", style: styles.qr }),
+    (0, import_react2.createElement)("div", { style: styles.code }, url),
+    (0, import_react2.createElement)("div", { style: styles.muted }, hint)
+  );
+  const row = (label, control, extra) => (0, import_react2.createElement)(
+    "div",
+    { style: { borderTop: "1px solid var(--dsw-alias-border-l2,#e5e7eb)", paddingTop: 9, marginTop: 9 } },
+    (0, import_react2.createElement)(
+      "div",
+      { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 } },
+      (0, import_react2.createElement)("span", { style: { fontSize: 13 } }, label),
+      control
+    ),
+    extra ?? null
+  );
+  const [advOpen, setAdvOpen] = (0, import_react2.useState)(false);
   return (0, import_react2.createElement)(
     "div",
     { style: styles.card },
@@ -1771,112 +2396,214 @@ function PocketSettingsTab({ rpcCall, t }) {
       (0, import_react2.createElement)(
         "div",
         { style: styles.muted, marginTop: 4 },
-        updateInfo.updating ? fmt(t, "updatingDetail", { s: elapsed(updateInfo.startedAt) }) : updateInfo.restarting ? fmt(t, "restartingDetail", { s: elapsed(updateInfo.startedAt) }) : updateInfo.result === "ok" ? updateInfo.autoRestart ? t("updatedAutoDetail") : t("updatedRestartDetail") : updateInfo.result === "fail" ? fmt(t, "updateFailed", { err: updateInfo.output || t("unknownError") }) : fmt(t, "versionRange", { cur: updateInfo.current, latest: updateInfo.latest })
+        updateInfo.updating ? fmt(t, "updatingDetail", { s: elapsed(updateInfo.startedAt) }) : updateInfo.restarting ? fmt(t, "restartingDetail", { s: elapsed(updateInfo.startedAt) }) : updateInfo.result === "ok" ? updateInfo.autoRestart ? t("updatedAutoDetail") : t("updatedRestartDetail") : updateInfo.result === "fail" ? fmt(t, "updateFailed", { err: errText(updateInfo.output) || t("unknownError") }) : fmt(t, "versionRange", { cur: updateInfo.current, latest: updateInfo.latest })
       )
     ) : null,
-    // 局域网
+    // 局域网：标题行自带总开关 → 二维码+地址 → 设置行（访问密码 / 高级·手动选地址）
     (0, import_react2.createElement)(
       "div",
       { style: styles.block },
-      (0, import_react2.createElement)("div", { style: { fontWeight: 600, fontSize: 13 } }, t("lanTitle")),
-      // 局域网访问总开关：关闭后扫码/链接直接失效（公网不受影响）
       (0, import_react2.createElement)(
         "div",
-        { style: { display: "flex", alignItems: "center", gap: 8, marginTop: 8 } },
-        (0, import_react2.createElement)("span", { style: { fontSize: 12, color: "var(--dsw-alias-label-secondary,#6b7280)" } }, t("lanAccess")),
-        (0, import_react2.createElement)("button", {
-          style: { ...styles.btn, height: 28, padding: "0 12px", fontSize: 12, fontWeight: status?.lanEnabled !== false ? 600 : 400, background: status?.lanEnabled !== false ? "var(--dsw-alias-button-primary-fill, var(--dsw-alias-brand-primary,#4f6ef7))" : "var(--dsw-alias-bg-layer-1,#fff)", color: status?.lanEnabled !== false ? "var(--dsw-alias-label-primary-foreground, #fff)" : "var(--dsw-alias-label-primary,inherit)" },
-          onClick: () => requestLanToggle(true)
-        }, t("on")),
-        (0, import_react2.createElement)("button", {
-          style: { ...styles.btn, height: 28, padding: "0 12px", fontSize: 12, fontWeight: status?.lanEnabled === false ? 600 : 400, background: status?.lanEnabled === false ? "var(--dsw-alias-state-error-primary,#dc2626)" : "var(--dsw-alias-bg-layer-1,#fff)", color: status?.lanEnabled === false ? "#fff" : "var(--dsw-alias-label-primary,inherit)" },
-          onClick: () => requestLanToggle(false)
-        }, t("off"))
+        { style: { display: "flex", alignItems: "center", justifyContent: "space-between" } },
+        (0, import_react2.createElement)("span", { style: { fontWeight: 600, fontSize: 13 } }, t("lanAccess")),
+        Switch(status?.lanEnabled !== false, () => requestLanToggle(status?.lanEnabled === false))
       ),
       status?.lanEnabled === false ? (0, import_react2.createElement)("div", { style: { marginTop: 8, fontSize: 12, color: "var(--dsw-alias-state-warn-primary,#b45309)", lineHeight: 1.5 } }, t("lanDisabledHint")) : lanUrl ? (0, import_react2.createElement)(
         "div",
         null,
-        (0, import_react2.createElement)("img", { src: status.lanQr, alt: "LAN QR", style: styles.qr }),
-        (0, import_react2.createElement)("div", { style: styles.code }, lanUrl),
-        (0, import_react2.createElement)("div", { style: styles.muted }, t("lanHint")),
-        (0, import_react2.createElement)(
-          "label",
-          { style: { display: "flex", alignItems: "center", gap: 8, marginTop: 10, fontSize: 12, color: "var(--dsw-alias-label-secondary,#6b7280)" } },
-          t("lanAddress"),
-          (0, import_react2.createElement)(
-            "select",
-            {
-              value: status?.lanIpOverride || "",
-              onChange: (e) => setLanAddress(e.target.value),
-              style: { font: "inherit", height: 30, padding: "0 8px", borderRadius: 8, border: "1px solid var(--dsw-alias-border-l2,#d1d5db)", background: "var(--dsw-alias-bg-layer-1,#fff)", color: "var(--dsw-alias-label-primary,inherit)" }
-            },
-            (0, import_react2.createElement)("option", { value: "" }, t("lanAddressAuto")),
-            (status?.lanCandidates || []).map((ip) => (0, import_react2.createElement)("option", { key: ip, value: ip }, ip))
+        qrArea(status.lanQr, lanUrl, t("lanHint")),
+        // 访问密码行：开关 + 值（关闭时提示直连）
+        row(
+          t("lanPin"),
+          Switch(status?.lanAuthEnabled !== false, () => setLanAuth(status?.lanAuthEnabled === false)),
+          status?.lanAuthEnabled === false ? (0, import_react2.createElement)("div", { style: { ...styles.muted, marginTop: 6 } }, t("lanPinOff")) : customPin?.which === "lan" ? customPinRow("lan") : (0, import_react2.createElement)(
+            "div",
+            { style: { marginTop: 6, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" } },
+            (0, import_react2.createElement)("span", { style: { fontFamily: "ui-monospace,Menlo,monospace", fontSize: 13, letterSpacing: 1 } }, status.lanToken),
+            (0, import_react2.createElement)("button", { style: { ...styles.btn, height: 26, padding: "0 10px", fontSize: 12 }, onClick: refreshLanPin }, t("refresh")),
+            customBtn("lan"),
+            status?.lanPinCustom ? (0, import_react2.createElement)("span", { style: { fontSize: 11, color: "var(--dsw-alias-state-warn-primary,#b45309)" } }, t("pinCustomHint")) : null
           )
         ),
-        (0, import_react2.createElement)("div", { style: { ...styles.muted, marginTop: 2 } }, t("lanAddressHint")),
-        // 访问密码开关（issue #24）：默认开启；关闭后扫码直连（仅同一局域网设备可访问）
-        (0, import_react2.createElement)(
-          "div",
-          { style: { display: "flex", alignItems: "center", gap: 8, marginTop: 8 } },
-          (0, import_react2.createElement)("span", { style: { fontSize: 12, color: "var(--dsw-alias-label-secondary,#6b7280)" } }, t("lanPin")),
-          (0, import_react2.createElement)("button", {
-            style: { ...styles.btn, height: 28, padding: "0 12px", fontSize: 12, fontWeight: status?.lanAuthEnabled !== false ? 600 : 400, background: status?.lanAuthEnabled !== false ? "var(--dsw-alias-button-primary-fill, var(--dsw-alias-brand-primary,#4f6ef7))" : "var(--dsw-alias-bg-layer-1,#fff)", color: status?.lanAuthEnabled !== false ? "var(--dsw-alias-label-primary-foreground, #fff)" : "var(--dsw-alias-label-primary,inherit)" },
-            onClick: () => setLanAuth(true)
-          }, t("on")),
-          (0, import_react2.createElement)("button", {
-            style: { ...styles.btn, height: 28, padding: "0 12px", fontSize: 12, fontWeight: status?.lanAuthEnabled === false ? 600 : 400, background: status?.lanAuthEnabled === false ? "var(--dsw-alias-state-error-primary,#dc2626)" : "var(--dsw-alias-bg-layer-1,#fff)", color: status?.lanAuthEnabled === false ? "#fff" : "var(--dsw-alias-label-primary,inherit)" },
-            onClick: () => setLanAuth(false)
-          }, t("off"))
-        ),
-        status?.lanAuthEnabled !== false ? customPin?.which === "lan" ? customPinRow("lan") : (0, import_react2.createElement)(
-          "div",
-          { style: { marginTop: 6, fontSize: 12, color: "var(--dsw-alias-label-secondary,#6b7280)", lineHeight: 1.5 } },
-          fmt(t, status?.lanPinCustom ? "lanPinCustomValue" : "lanPinValue", { pin: status.lanToken }),
-          (0, import_react2.createElement)("button", { style: { ...styles.btn, height: 26, padding: "0 10px", fontSize: 12, marginLeft: 8 }, onClick: refreshLanPin }, t("refresh")),
-          customBtn("lan")
-        ) : (0, import_react2.createElement)(
-          "div",
-          { style: { marginTop: 6, fontSize: 12, color: "var(--dsw-alias-state-warn-primary,#b45309)", lineHeight: 1.5 } },
-          t("lanPinOff")
+        // 高级：手动选地址（默认收起）
+        row(
+          t("advAddress"),
+          (0, import_react2.createElement)(
+            "button",
+            { style: { border: "none", background: "none", font: "inherit", cursor: "pointer", fontSize: 12, color: "var(--dsw-alias-label-tertiary,#8b93a1)", padding: 0 }, onClick: () => setAdvOpen((v) => !v) },
+            (status?.lanIpOverride || t("lanAddressAuto")) + " \u203A"
+          ),
+          advOpen ? (0, import_react2.createElement)(
+            "div",
+            { style: { marginTop: 8 } },
+            (0, import_react2.createElement)(
+              "label",
+              { style: { display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "var(--dsw-alias-label-secondary,#6b7280)" } },
+              t("lanAddress"),
+              (0, import_react2.createElement)(
+                "select",
+                {
+                  value: status?.lanIpOverride || "",
+                  onChange: (e) => setLanAddress(e.target.value),
+                  style: { font: "inherit", height: 30, padding: "0 8px", borderRadius: 8, border: "1px solid var(--dsw-alias-border-l2,#d1d5db)", background: "var(--dsw-alias-bg-layer-1,#fff)", color: "var(--dsw-alias-label-primary,inherit)" }
+                },
+                (0, import_react2.createElement)("option", { value: "" }, t("lanAddressAuto")),
+                (status?.lanCandidates || []).map((ip) => (0, import_react2.createElement)("option", { key: ip, value: ip }, ip))
+              )
+            )
+          ) : null
         )
       ) : (0, import_react2.createElement)("div", { style: styles.muted }, t("lanStarting"))
     ),
-    // 公网
+    // 公网：标题行自带 开启/关闭 → 开启后：二维码+地址、地址模式行、访问密码行
     (0, import_react2.createElement)(
       "div",
       { style: styles.block },
-      (0, import_react2.createElement)("div", { style: { fontWeight: 600, fontSize: 13 } }, t("wanTitle")),
+      (0, import_react2.createElement)(
+        "div",
+        { style: { display: "flex", alignItems: "center", justifyContent: "space-between" } },
+        (0, import_react2.createElement)("span", { style: { fontWeight: 600, fontSize: 13 } }, t("wanAccess")),
+        tunnelUrl ? (0, import_react2.createElement)("button", { style: { ...styles.btn, height: 28, padding: "0 12px", fontSize: 12, color: "var(--dsw-alias-state-error-primary,#dc2626)" }, onClick: stopTunnel }, t("stopTunnel")) : (0, import_react2.createElement)("button", { style: { ...styles.primary, height: 28, padding: "0 14px", fontSize: 12 }, onClick: startTunnel, disabled: busy || tunnelStarting }, busy || tunnelStarting ? t("opening") : t("enable"))
+      ),
+      tunnelStarting ? (0, import_react2.createElement)(
+        "div",
+        { style: { marginTop: 8, fontSize: 12, color: "var(--dsw-alias-label-secondary,#6b7280)" } },
+        tunnelPhase === "downloading" ? fmt(t, "downloading", { s: elapsed(tunnelStateStarted) }) : fmt(t, "connecting", { s: elapsed(tunnelStateStarted), suffix: elapsed(tunnelStateStarted) > 30 ? t("slowHint") : "" })
+      ) : tunnelPhase === "error" ? (0, import_react2.createElement)(
+        "div",
+        { style: { marginTop: 8, fontSize: 12, color: "var(--dsw-alias-state-error-primary,#dc2626)" } },
+        fmt(t, "error", { detail: errText(tunnelStateDetail) || t("unknownError") })
+      ) : !tunnelUrl && !isDesktop ? (0, import_react2.createElement)("div", { style: { ...styles.muted, marginTop: 8 } }, t("wanOffHint")) : null,
       tunnelUrl ? (0, import_react2.createElement)(
         "div",
         null,
-        (0, import_react2.createElement)("img", { src: status.tunnelQr, alt: "Tunnel QR", style: styles.qr }),
-        (0, import_react2.createElement)("div", { style: styles.code }, tunnelUrl),
-        (0, import_react2.createElement)("div", { style: styles.muted }, t("wanHint")),
-        status.accessToken ? customPin?.which === "public" ? customPinRow("public") : (0, import_react2.createElement)(
-          "div",
-          { style: { marginTop: 6, fontSize: 12, color: "var(--dsw-alias-label-secondary,#6b7280)", lineHeight: 1.5 } },
-          fmt(t, status?.publicPinCustom ? "wanPinCustom" : "wanPin", { pin: status.accessToken }),
-          customBtn("public"),
-          status?.publicPinCustom ? (0, import_react2.createElement)("div", { style: { marginTop: 2, fontSize: 11, color: "var(--dsw-alias-state-warn-primary,#b45309)" } }, t("pinCustomHint")) : null
-        ) : null,
-        (0, import_react2.createElement)("button", { style: styles.btn, onClick: stopTunnel }, t("stopTunnel"))
-      ) : (0, import_react2.createElement)(
-        "div",
-        null,
-        (0, import_react2.createElement)("button", { style: { ...styles.primary, margin: "8px 0" }, onClick: startTunnel, disabled: busy || tunnelStarting }, busy ? t("opening") : t("enable")),
-        tunnelStarting ? (0, import_react2.createElement)(
-          "div",
-          { style: { marginTop: 4, fontSize: 12, color: "var(--dsw-alias-label-secondary,#6b7280)" } },
-          tunnelPhase === "downloading" ? fmt(t, "downloading", { s: elapsed(tunnelStateStarted) }) : fmt(t, "connecting", { s: elapsed(tunnelStateStarted), suffix: elapsed(tunnelStateStarted) > 30 ? t("slowHint") : "" })
-        ) : tunnelPhase === "error" ? (0, import_react2.createElement)(
-          "div",
-          { style: { marginTop: 4, fontSize: 12, color: "var(--dsw-alias-state-error-primary,#dc2626)" } },
-          fmt(t, "error", { detail: tunnelStateDetail || t("unknownError") })
+        qrArea(status.tunnelQr, tunnelUrl, namedMode ? t("namedRunningHint") : t("wanHint")),
+        // 防钓鱼 / 别收藏（issue #82）：公网链接仅本次有效、勿收藏提示
+        (0, import_react2.createElement)("div", { style: { marginTop: 8, fontSize: 12, lineHeight: 1.5, borderLeft: "4px solid var(--dsw-alias-state-warn-primary,#b45309)", background: "var(--dsw-alias-bg-layer-2,#f3f4f6)", borderRadius: 8, padding: "8px 10px" } }, t("wanEphemeralWarn")),
+        // 地址模式行（随机/固定；固定域名选中或编辑时高亮）
+        row(
+          t("modeLabel"),
+          (0, import_react2.createElement)(
+            "span",
+            { style: { display: "inline-flex", gap: 6 } },
+            (0, import_react2.createElement)("button", { style: modeBtnStyle(!namedActive), onClick: namedMode ? switchToQuick : tunnelCfg ? () => setTunnelCfg(null) : void 0 }, t("modeQuick")),
+            (0, import_react2.createElement)("button", { style: modeBtnStyle(namedActive), onClick: () => setTunnelCfg(tunnelCfg ? null : { hostname: tunnelModeView.hostname ?? "", token: "", err: null }) }, t("modeNamed"))
+          ),
+          (0, import_react2.createElement)(
+            "div",
+            { style: { marginTop: 6 } },
+            // 刚保存固定域名但当前连接仍是随机域名：需关闭后重新开启才生效
+            namedMode && /trycloudflare\.com/i.test(tunnelUrl ?? "") ? (0, import_react2.createElement)("div", { style: { ...styles.warn } }, t("namedTakeEffect")) : null,
+            // 固定域名：已保存摘要 + 修改入口（非编辑态）
+            namedMode && !tunnelCfg ? (0, import_react2.createElement)(
+              "div",
+              { style: { ...styles.muted } },
+              fmt(t, "namedSummary", { host: tunnelModeView.hostname || "\u2014", token: tunnelModeView.tokenSet ? t("namedTokenSet") : t("namedTokenMissing") }),
+              (0, import_react2.createElement)("button", { style: { ...styles.btn, height: 26, padding: "0 10px", fontSize: 12, marginLeft: 8 }, onClick: () => setTunnelCfg({ hostname: tunnelModeView.hostname ?? "", token: "", err: null }) }, t("namedEdit")),
+              (0, import_react2.createElement)("div", { style: { ...styles.muted, marginTop: 4 } }, t("namedHow")),
+              !tunnelModeView.tokenSet || !tunnelModeView.hostname ? (0, import_react2.createElement)("div", { style: { marginTop: 2, color: "var(--dsw-alias-state-error-primary,#dc2626)" } }, t("namedNeedCfg")) : null
+            ) : null,
+            // 固定域名：编辑表单（域名 + Tunnel Token，Token 留空保持不变）
+            tunnelCfg ? (0, import_react2.createElement)(
+              "div",
+              { style: { marginTop: 6, fontSize: 12, color: "var(--dsw-alias-label-secondary,#6b7280)", lineHeight: 1.6 } },
+              (0, import_react2.createElement)(
+                "div",
+                null,
+                t("namedHostnameLabel"),
+                (0, import_react2.createElement)("input", {
+                  style: { margin: "4px 0 0 6px", padding: "4px 8px", fontSize: 13, border: "1px solid var(--dsw-alias-border-l2,#d1d5db)", borderRadius: 6, outline: "none", width: 200 },
+                  placeholder: "pocket.example.com",
+                  value: tunnelCfg.hostname ?? "",
+                  autoFocus: true,
+                  onChange: (e) => setTunnelCfg((c) => ({ ...c, hostname: e.target.value.trim(), err: null })),
+                  onKeyDown: (e) => {
+                    if (e.key === "Enter") saveNamedTunnel();
+                    if (e.key === "Escape") setTunnelCfg(null);
+                  }
+                })
+              ),
+              (0, import_react2.createElement)(
+                "div",
+                { style: { marginTop: 6 } },
+                t("namedTokenLabel"),
+                (0, import_react2.createElement)("input", {
+                  style: { margin: "4px 0 0 6px", padding: "4px 8px", fontSize: 13, border: "1px solid var(--dsw-alias-border-l2,#d1d5db)", borderRadius: 6, outline: "none", width: 240, fontFamily: "ui-monospace,Menlo,monospace" },
+                  type: "password",
+                  value: tunnelCfg.token ?? "",
+                  onChange: (e) => setTunnelCfg((c) => ({ ...c, token: e.target.value.trim(), err: null })),
+                  onKeyDown: (e) => {
+                    if (e.key === "Enter") saveNamedTunnel();
+                    if (e.key === "Escape") setTunnelCfg(null);
+                  }
+                })
+              ),
+              (0, import_react2.createElement)(
+                "div",
+                { style: { marginTop: 6, display: "flex", gap: 8 } },
+                (0, import_react2.createElement)("button", { style: { ...styles.btn, height: 26, padding: "0 10px", fontSize: 12 }, onClick: saveNamedTunnel }, t("save")),
+                (0, import_react2.createElement)("button", { style: { ...styles.btn, height: 26, padding: "0 10px", fontSize: 12 }, onClick: () => setTunnelCfg(null) }, t("cancel"))
+              ),
+              (0, import_react2.createElement)("div", { style: { ...styles.muted, marginTop: 6 } }, t("namedHow")),
+              (0, import_react2.createElement)("div", { style: { marginTop: 2, fontSize: 11, color: "var(--dsw-alias-state-warn-primary,#b45309)", lineHeight: 1.5 } }, t("namedSecurity")),
+              tunnelCfg.err ? (0, import_react2.createElement)("div", { style: { color: "var(--dsw-alias-state-error-primary,#dc2626)", marginTop: 4 } }, errText(tunnelCfg.err)) : null
+            ) : null
+          )
+        ),
+        // 访问密码行：值 + 自定义（自定义输入态整体替换）
+        status.accessToken ? row(
+          t("pinLabel"),
+          customPin?.which === "public" ? null : (0, import_react2.createElement)(
+            "span",
+            { style: { display: "inline-flex", alignItems: "center", gap: 8 } },
+            (0, import_react2.createElement)("span", { style: { fontFamily: "ui-monospace,Menlo,monospace", fontSize: 13, letterSpacing: 1 } }, status.accessToken),
+            customBtn("public")
+          ),
+          (0, import_react2.createElement)(
+            "div",
+            { style: { marginTop: 6 } },
+            customPin?.which === "public" ? customPinRow("public") : null,
+            status?.publicPinCustom ? (0, import_react2.createElement)("div", { style: { ...styles.warn } }, t("pinCustomHint")) : null,
+            namedMode ? (0, import_react2.createElement)("div", { style: { ...styles.warn } }, t("namedSecurity")) : null
+          )
         ) : null
-      )
+      ) : null
     ),
-    error ? (0, import_react2.createElement)("div", { style: { color: "var(--dsw-alias-state-error-primary,#dc2626)", fontSize: 12, marginTop: 8 } }, `\u274C ${error}`) : null,
+    error ? (0, import_react2.createElement)("div", { style: { color: "var(--dsw-alias-state-error-primary,#dc2626)", fontSize: 12, marginTop: 8 } }, `\u274C ${errText(error)}`) : null,
+    // 恢复出厂设置：设置出问题时的临时兜底（最底部，避免误触）
+    (0, import_react2.createElement)(
+      "div",
+      { style: styles.block },
+      (0, import_react2.createElement)(
+        "div",
+        { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 } },
+        (0, import_react2.createElement)("span", { style: { fontWeight: 600, fontSize: 13 } }, t("resetFactory")),
+        (0, import_react2.createElement)("button", { style: { ...styles.btn, height: 28, padding: "0 12px", fontSize: 12, color: "var(--dsw-alias-state-error-primary,#dc2626)" }, onClick: () => setResetOpen(true) }, t("resetGo"))
+      ),
+      (0, import_react2.createElement)("div", { style: { ...styles.muted, marginTop: 6 } }, t("resetIntro"))
+    ),
+    // 恢复出厂设置确认弹框
+    resetOpen ? (0, import_react2.createElement)(
+      "div",
+      { style: { position: "fixed", inset: 0, zIndex: 1e4, background: "rgba(0,0,0,.5)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20 } },
+      (0, import_react2.createElement)(
+        "div",
+        { style: { background: "var(--dsw-alias-bg-layer-1,#fff)", borderRadius: 12, maxWidth: 440, width: "100%", padding: "20px 22px", boxShadow: "0 8px 32px rgba(0,0,0,.18)" } },
+        (0, import_react2.createElement)("div", { style: { fontWeight: 600, fontSize: 15, color: "var(--dsw-alias-state-warn-primary,#b45309)", marginBottom: 10 } }, t("resetTitle")),
+        (0, import_react2.createElement)("div", { style: { fontSize: 13, lineHeight: 1.7, color: "var(--dsw-alias-label-primary,inherit)", whiteSpace: "pre-line" } }, t("resetBody")),
+        (0, import_react2.createElement)(
+          "div",
+          { style: { display: "flex", gap: 8, marginTop: 16 } },
+          (0, import_react2.createElement)("button", { style: { ...styles.btn, flex: 1 }, onClick: () => setResetOpen(false) }, t("cancel")),
+          (0, import_react2.createElement)("button", { style: { ...styles.primary, flex: 1, background: "var(--dsw-alias-state-error-primary,#dc2626)" }, onClick: doFactoryReset }, t("resetConfirm"))
+        )
+      )
+    ) : null,
+    // Toast：重置等操作的即时反馈（固定屏幕正中央，2.6s 自动消失）
+    toast ? (0, import_react2.createElement)("div", {
+      style: { position: "fixed", left: "50%", top: "50%", transform: "translate(-50%, -50%)", zIndex: 10001, width: "auto", maxWidth: 280, background: "rgba(17,24,39,.92)", color: "#fff", border: "none", borderRadius: 10, padding: "10px 16px", fontSize: 13, lineHeight: 1.5, textAlign: "center", boxShadow: "0 8px 24px rgba(0,0,0,.22)" }
+    }, toast) : null,
     // 局域网访问开关确认弹框（关闭/打开时弹窗提醒）
     lanToggleOpen !== null ? (0, import_react2.createElement)(
       "div",
@@ -1935,6 +2662,16 @@ function PocketSettingsTab({ rpcCall, t }) {
   );
 }
 function apply(ctx) {
+  if (ctx?.connection) {
+    try {
+      Object.defineProperty(ctx.connection, "isLoopback", { value: true, writable: true, configurable: true });
+    } catch {
+      try {
+        ctx.connection.isLoopback = true;
+      } catch {
+      }
+    }
+  }
   mobileApply(ctx);
   const rpcCall = (endpoint, payload, signal) => ctx.connection.rpc.call(POCKET_RPC_CHANNEL, endpoint, payload, signal);
   const translate = ctx.locale.bind(NS2);
