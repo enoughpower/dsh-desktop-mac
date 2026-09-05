@@ -108,7 +108,7 @@ async function resolveUpdateSet(latestMeta) {
     const entry = queue.shift();
     if (targets.has(entry.name)) continue;
     if (!entry.tarball) continue;
-    targets.set(entry.name, { name: entry.name, version: entry.version, tarball: entry.tarball });
+    targets.set(entry.name, { name: entry.name, version: entry.version, tarball: entry.tarball, deps: entry.deps ?? {} });
     for (const [depName, range] of Object.entries(entry.deps)) {
       if (!depName.startsWith("@deepseek-ai/")) continue;
       if (targets.has(depName)) continue;
@@ -136,6 +136,49 @@ function packagesNeedingUpdate(resolved) {
     if (installed === undefined || semver.gt(entry.version, installed)) out.push(entry);
   }
   return out;
+}
+
+/**
+ * Third-party (non-@deepseek-ai/*) dependencies the tracked closure needs but
+ * that are missing from the bundle's node_modules. The tarball swap only
+ * replaces @deepseek-ai/* packages, so a brand-new third-party dep introduced
+ * by the newer core (e.g. dsh-app-boot's resolve.exports) would otherwise be
+ * absent at boot (ERR_MODULE_NOT_FOUND). BFS their own third-party closure so
+ * the bundle stays bootable after every update.
+ */
+async function resolveMissingNpmDeps(targets) {
+  const missing = [];
+  const seen = new Set();
+  const present = (name) => existsSync(join(NM_ROOT, ...name.split("/")));
+  const queue = [];
+  for (const entry of targets) {
+    for (const [depName, range] of Object.entries(entry.deps ?? {})) {
+      if (depName.startsWith("@deepseek-ai/") || present(depName) || seen.has(depName)) continue;
+      seen.add(depName);
+      queue.push({ name: depName, range });
+    }
+  }
+  while (queue.length > 0) {
+    const { name, range } = queue.shift();
+    if (present(name) || seen.has("done:" + name)) continue;
+    let meta;
+    try {
+      meta = await registryGet(name);
+    } catch {
+      continue; // unresolvable (private/git dep) — leave untouched
+    }
+    const version = semver.maxSatisfying(Object.keys(meta.versions ?? {}), range ?? "*");
+    const record = version ? meta.versions[version] : undefined;
+    if (!record?.dist?.tarball) continue;
+    seen.add("done:" + name);
+    missing.push({ name, version: record.version, tarball: record.dist.tarball, deps: record.dependencies ?? {}, root: NM_ROOT });
+    for (const [depName, depRange] of Object.entries(record.dependencies ?? {})) {
+      if (depName.startsWith("@deepseek-ai/") || present(depName) || seen.has(depName)) continue;
+      seen.add(depName);
+      queue.push({ name: depName, range: depRange });
+    }
+  }
+  return missing;
 }
 
 // ── download + install ──────────────────────────────────────────────────────
@@ -240,9 +283,10 @@ async function installPackages(entries, onStatus) {
     for (const { entry, tgz } of results) {
       const extractDir = join(staging, `x-${count}`);
       const pkgDir = await extractTarball(tgz, extractDir);
-      const dest = join(AI_ROOT, entry.name.slice("@deepseek-ai/".length));
+      const short = entry.name.startsWith("@deepseek-ai/") ? entry.name.slice("@deepseek-ai/".length) : entry.name;
+      const dest = join(entry.root ?? AI_ROOT, ...short.split("/"));
       rmSync(dest, { recursive: true, force: true });
-      mkdirSync(AI_ROOT, { recursive: true });
+      mkdirSync(dirname(dest), { recursive: true });
       renameSync(pkgDir, dest);
       count++;
     }
@@ -356,18 +400,19 @@ async function runUpdate(latest, current) {
   try {
     const resolved = await resolveUpdateSet(latest);
     const needed = packagesNeedingUpdate(resolved);
-    if (needed.length === 0) {
+    const extra = await resolveMissingNpmDeps(resolved);
+    if (needed.length + extra.length === 0) {
       updateState = { running: false, phase: "up-to-date", done: 0, total: 0, from: current, to: latest.version };
       return;
     }
-    updateState = { running: true, phase: "download", done: 0, total: needed.length, from: current, to: latest.version };
-    const count = await installPackages(needed, (done, total) => {
+    updateState = { running: true, phase: "download", done: 0, total: needed.length + extra.length, from: current, to: latest.version };
+    const count = await installPackages([...needed, ...extra], (done, total) => {
       if (updateState) updateState = { ...updateState, done, total };
     });
     patchSettingsNavIcons();
     writeFileSync(
       join(BACKEND_DIR, ".dsh-updated.json"),
-      JSON.stringify({ from: current, to: latest.version, at: new Date().toISOString(), packages: count }, null, 2),
+      JSON.stringify({ from: current, to: latest.version, at: new Date().toISOString(), packages: count, extra: extra.length }, null, 2),
     );
     updateState = { running: false, phase: "done", done: count, total: needed.length, from: current, to: latest.version };
     scheduleRestart(2500);
@@ -443,4 +488,4 @@ function apply(ctx) {
   );
 }
 
-export { apply, inject, name, currentVersion, fetchLatestDsh, resolveUpdateSet, packagesNeedingUpdate, installPackages, patchSettingsNavIcons };
+export { apply, inject, name, currentVersion, fetchLatestDsh, resolveUpdateSet, packagesNeedingUpdate, resolveMissingNpmDeps, installPackages, patchSettingsNavIcons };

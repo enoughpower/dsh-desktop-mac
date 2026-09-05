@@ -132,9 +132,9 @@ The app shows the current DeepSeek Harness version in the **top-right corner** (
 package version, e.g. `v0.1.1-rc.2`). Under **Settings → Check for Updates**:
 
 - **Check for updates**: compares against the latest `@deepseek-ai/dsh` on the npm registry;
-- **Update now**: downloads the latest closure (dsh + all its `@deepseek-ai/*` deps) and atomically
-  replaces the bundle's `node_modules`, then restarts the app (re-signed to keep the arm64 ad-hoc
-  signature valid).
+- **Update now**: downloads the latest closure (dsh + all its `@deepseek-ai/*` deps, plus any new
+  third-party deps missing from the bundle) and atomically replaces the bundle's `node_modules`,
+  then restarts the app (re-signed to keep the arm64 ad-hoc signature valid).
 
 This is a built-in plugin (same pattern as git):
 

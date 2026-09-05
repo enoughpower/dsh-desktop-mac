@@ -71,3 +71,14 @@
   应用体积 370M → 242M）。改为运行时装入桌面用户 profile
   （`$DSH_HOME/profiles/web/node_modules/dsh-pet@0.2.0-hevc`，经 `add-plugin.sh --runtime`），
   dsh-pet 作为 bundle 插件自动进 profile bundles 层；应用重建/升级不清除用户已装插件。
+
+## 2026-09-05
+
+- **升级**：`@deepseek-ai/dsh` 0.1.1-rc.2 → 0.1.2-rc.1（应用版本 1.0.0 → 1.0.1），依赖闭包
+  同步补齐（`resolve.exports`、`lexical`/`@lexical/*`、`compression`、`@xterm/headless`、
+  `@agentclientprotocol/sdk`、`@octokit/webhooks` 等）。
+- **修复**：「检查更新」升级后应用无法启动——自更新只替换 `@deepseek-ai/*` 包，新版本闭包
+  引入的第三方依赖（如 dsh-app-boot 的 `resolve.exports`）不会安装，后端启动即报
+  `ERR_MODULE_NOT_FOUND: Cannot find package` 退出、应用打不开。更新器现会在替换
+  `@deepseek-ai/*` 的同时自动补装缺失的第三方依赖，更新后应用仍可正常启动。
+
