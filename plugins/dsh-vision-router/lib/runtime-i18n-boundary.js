@@ -25,6 +25,11 @@ const LONG_SCREENSHOT_OCR_PROMPT_ZH =
   '请原样转述这张长截图分片中的所有文字，保持阅读顺序（从上到下、从左到右），不要添加解释，只输出文字本身。如果画面中没有可见文字，只输出 EMPTY，不要编造内容。'
 
 const EN_GUIDANCE_REPLACEMENTS = Object.freeze([
+  ['检测到代码内容。按用户问题决定证据：只有当结论依赖可执行或逐字代码时才需要逐字保真；仅问语言、结构或语义时可直接做针对性语义复核。', 'Code content detected. Let the user question determine the evidence: require verbatim fidelity only when the conclusion depends on executable or text-exact code; language, structure, or semantic questions can use targeted semantic verification.'],
+  ['检测到界面内容。按用户问题选择最小必要证据：语义复核、元素盘点或精确定位均可，不固定组合工具。', 'UI content detected. Choose the smallest evidence needed for the user question: semantic verification, element inventory, or precise localization; do not require a fixed tool combination.'],
+  ['仅当任务依赖可执行或逐字代码时才做逐字转写；否则按语义问题查证', 'use verbatim transcription only when the task depends on executable or text-exact code; otherwise verify the semantic question directly'],
+  ['按问题需要选择语义复核、元素盘点或精确定位，不固定工具组合', 'choose semantic verification, element inventory, or precise localization according to the question; do not require a fixed tool combination'],
+  ['仅当任务依赖可执行或逐字代码时才要求逐字保真；否则按语义问题查证', 'require verbatim fidelity only when the task depends on executable or text-exact code; otherwise verify the semantic question directly'],
   ['检测到代码内容。代码必须逐字转写，建议分区域转写 + 语义确认，避免概括。', 'Code content detected. Transcribe code verbatim; use region-by-region transcription plus semantic verification instead of summarizing it.'],
   ['检测到文档内容。语义优先；仅当需要逐字引用（长文档/合同/表单）时才用 OCR。', 'Document content detected. Prefer semantic understanding; use OCR only when verbatim quotation is required, such as for long documents, contracts, or forms.'],
   ['检测到界面内容。建议元素清单（detect）+ 关键元素定位（ground）。', 'UI content detected. Prefer an element inventory (detect) plus grounding of important elements (ground).'],
@@ -109,6 +114,10 @@ function localizeModelMetadata(value, i18n) {
 function translateGuidanceText(input) {
   let text = input
   text = text.replace(
+    /检测到混合内容（([^）]+)）。只关注与用户问题相关的分支；如果答案确实依赖多个分支，再按需分别验证这些分支。分支之间不要盲目混用识别方式。/g,
+    "Mixed content detected ($1). Focus on the branch or branches relevant to the user question. If the answer depends on more than one branch, verify those branches separately as needed; do not reuse one branch's recognition method blindly for another branch.",
+  )
+  text = text.replace(
     /检测到混合内容（([^）]+)）。本轮深度档位为 fast：先验证主分支（([^）]+)）一次；完整分路验证需升级档位。/g,
     'Mixed content detected ($1). Vision depth is fast for this turn: verify the primary branch ($2) once; raise the depth tier for full branch-by-branch verification.',
   )
@@ -168,12 +177,28 @@ function translateLegacyRuntimeText(value, i18n) {
   // protocol copy, then the known depth/mixed guidance sentences.
   let text = value
     .replace(
+      '图片的整体预识别已经完成。请结合用户问题和当前 evidence，至少调用 1 个能新增或验证所需证据的视觉工具；recommended_followups 只是任务无关的候选建议，不是调用计划。完成前先不回答。',
+      'The whole-image structured bootstrap is complete. Use the user question and current evidence to call at least 1 vision tool that adds or verifies needed evidence; recommended_followups are task-independent suggestions only, not a required plan. Do not answer before that call completes.',
+    )
+    .replace(
       '图片的整体预识别已经完成。接下来我先围绕你的问题做至少 1 次深挖验证：根据 evidence / recommended_followups 选择并调用至少 1 个能新增或验证证据的视觉工具，完成前先不回答。',
       'The whole-image structured bootstrap is complete. Next, perform at least 1 targeted evidence call for the user’s question: use evidence / recommended_followups to choose a vision tool that adds or verifies evidence, and do not answer before that call completes.',
     )
     .replace(
-      '不要默认把 OCR 当第二步：OCR 是逐字转写，对 1/l、0/O、空格、换行存在系统性混淆，逐字结果往往比结合上下文的语义理解（vision_describe / vision_detect）更不可靠；仅当需要逐字保真且无法靠上下文恢复时才用 vision_ocr（如可执行代码、需精确引用的长文档/合同/表单、表格数字、验证码、无语义锚点的生僻字）。若确实调用 vision_ocr，把它当需要交叉验证的证据，而不是最终事实。UI/截图语义验证优先 vision_detect 或聚焦的 vision_describe；局部目标可用 vision_ground。结构化模式下若确实调用 vision_ocr 且未显式指定引擎，会自动使用视觉模型 OCR（engine=vision）而不是先接受本地 Tesseract 的非空结果，以提高中文/UI 文字准确率。完成至少 1 次后续证据调用后再进入自由 Agent 循环，可继续调用更多工具或作答。',
-      'Do not default to OCR as the second step: OCR is verbatim transcription and can systematically confuse 1/l, 0/O, spaces, and line breaks. Use vision_ocr only when text-exact evidence is required and context cannot safely recover it (for example executable code, exact quotations from long documents/contracts/forms, table numbers, CAPTCHAs, or rare characters without semantic anchors). Treat OCR as evidence to cross-check, not final truth. For UI/screenshot semantics prefer vision_detect or a focused vision_describe; use vision_ground for local targets. In structured mode, vision_ocr without an explicit engine uses vision-model OCR (engine=vision) instead of accepting the first non-empty local Tesseract result. After at least 1 follow-up evidence call, continue the normal agent loop and use more tools only as needed.',
+      '结构化模式下若确实调用 vision_ocr，未指定 engine 或 engine=auto 时会直接使用视觉模型 OCR（engine=vision），而不是先接受本地 Tesseract 的非空结果；显式 engine=tesseract 或 engine=vision 始终保留。这样优先保证中文/UI 文字准确率。',
+      'vision_ocr 的 engine=auto 始终先尝试本地 Tesseract，失败或空结果时再回退视觉模型；结构化模式不会改变这个执行顺序。若需要强制视觉模型 OCR，请显式指定 engine=vision。',
+    )
+    .replace(
+      'In structured mode, vision_ocr with an omitted engine or engine=auto uses vision-model OCR (engine=vision) directly instead of accepting the first non-empty local Tesseract result; explicit engine=tesseract or engine=vision is always preserved.',
+      'For vision_ocr, engine=auto always tries local Tesseract first and falls back to the vision model only when local OCR fails or returns no text; structured mode does not change this order. Use explicit engine=vision to force vision-model OCR.',
+    )
+    .replace(
+      '不要默认把 OCR 当第二步；仅在需要逐字保真时用 vision_ocr，并把结果当作需要结合上下文验证的证据。UI/截图语义通常用 vision_describe 或 vision_detect，精确定位用 vision_ground。vision_ocr 的 engine=auto 始终先尝试本地 Tesseract，失败或空结果时再回退视觉模型；结构化模式不会改变这一顺序。完成至少 1 次后续证据调用后，证据充分就直接作答，不要为了流程继续调用。',
+      'Do not default to OCR as the second step. Use vision_ocr only for verbatim evidence and verify it against context. For UI/screenshot semantics use vision_describe or vision_detect; use vision_ground for precise localization. For vision_ocr, engine=auto always tries local Tesseract first and falls back to the vision model only when local OCR fails or returns no text; structured mode does not change this order. After at least 1 follow-up evidence call, answer once the evidence is sufficient instead of calling more tools just for the workflow.',
+    )
+    .replace(
+      '不要默认把 OCR 当第二步：OCR 是逐字转写，对 1/l、0/O、空格、换行存在系统性混淆，逐字结果往往比结合上下文的语义理解（vision_describe / vision_detect）更不可靠；仅当需要逐字保真且无法靠上下文恢复时才用 vision_ocr（如可执行代码、需精确引用的长文档/合同/表单、表格数字、验证码、无语义锚点的生僻字）。若确实调用 vision_ocr，把它当需要交叉验证的证据，而不是最终事实。UI/截图语义验证优先 vision_detect 或聚焦的 vision_describe；局部目标可用 vision_ground。vision_ocr 的 engine=auto 始终先尝试本地 Tesseract，失败或空结果时再回退视觉模型；结构化模式不会改变这个执行顺序。若需要强制视觉模型 OCR，请显式指定 engine=vision。完成至少 1 次后续证据调用后再进入自由 Agent 循环，可继续调用更多工具或作答。',
+      'Do not default to OCR as the second step: OCR is verbatim transcription and can systematically confuse 1/l, 0/O, spaces, and line breaks. Use vision_ocr only when text-exact evidence is required and context cannot safely recover it (for example executable code, exact quotations from long documents/contracts/forms, table numbers, CAPTCHAs, or rare characters without semantic anchors). Treat OCR as evidence to cross-check, not final truth. For UI/screenshot semantics prefer vision_detect or a focused vision_describe; use vision_ground for local targets. For vision_ocr, engine=auto always tries local Tesseract first and falls back to the vision model only when local OCR fails or returns no text; structured mode does not change this order. Use explicit engine=vision to force vision-model OCR. After at least 1 follow-up evidence call, continue the normal agent loop and use more tools only as needed.',
     )
   return translateGuidanceText(text)
 }

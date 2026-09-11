@@ -16,19 +16,21 @@
 import { z } from 'zod'
 import fs from 'node:fs'
 import { createHash } from 'node:crypto'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { Ledger, applyConfigPatch, localDayKey, pickBalanceInfo, reconcileBalanceDelta, zeroDay, splitLedgerApiCost, repairLedgerPricing, dedupeWrapperProviderDays, unpriceLocalOriginModels, stripSecrets, stripSecretPatch, secretRefOf, readSecret, writeSecret, SECRET_TARGETS, looksLikeSecretHeaderValue } from './store.js'
 import { backfillLegacyLedger, importLegacyHistory, repairForkSeed, repairProviderDupes, recomputeLedgerPricingBasis } from './backfill.js'
 import { createLlmStreamBilling } from './billing-stream.js'
-import { OFFICIAL_PRICING_URL, OFFICIAL_PRICING_URL_ZH, LEGACY_BASE_BOUNDARY, normalizePrice, parsePricingHtml, costOf, providerPriceEntryFor, buildPriceCatalog, usdFromCost, isWrapperProviderId, wrapperUpstreamProvider } from './pricing.js'
+import { OFFICIAL_PRICING_URL, OFFICIAL_PRICING_URL_ZH, LEGACY_BASE_BOUNDARY, FLASH_PRICE_EFFECTIVE_AT, PRO_FLASH_ROUTING_EFFECTIVE_AT, normalizePrice, parsePricingHtml, repairDefaultPeakPrice, upgradeDeepSeekPriceTable, costOf, providerPriceEntryFor, buildPriceCatalog, usdFromCost, isWrapperProviderId, wrapperUpstreamProvider } from './pricing.js'
 import { createUsageDeduper, USAGE_DEDUP_WINDOW_MS, usageFingerprint } from './usage-dedup.js'
 import { CODING_PLAN_PROVIDERS, CODING_PLAN_PROVIDER_IDS, queryCodingPlan, scnetTokenPlanWindows, qwenTokenPlanWindows, emptyCustomBalance, queryCustomBalance, normalizeVolcengineKey } from './coding-plans.js'
-import { recordSamples, buildPlanStats, canonicalWindowKey, periodStartOf, aggregateUsageSince, enabledPlanSetOf, pruneHourBuckets, suggestPlanAutoClasses } from './plan-billing.js'
+import { recordSamples, buildPlanStats, canonicalWindowKey, periodStartOf, aggregateUsageSince, enabledPlanSetOf, billingClassOf, pruneHourBuckets, suggestPlanAutoClasses } from './plan-billing.js'
 import { fetchWithRetry } from './net.js'
 import { queryGatewayQuota, emptyGatewayQuota, managementKeyVarOf, gatewaySourceFingerprint } from './gateway-quotas.js'
 import { stateSchema } from './typert.host.js'
+import { customBalanceCredentialVars } from './custom-balance.js'
+import { readScnetSnapshot } from './scnet-snapshot.js'
 
 export const name = 'cost-meter'
 
@@ -374,7 +376,8 @@ function makeCostUsageProjection(ledger) {
     // v6→v7(issue #63):seedLength 仅显式取值,普通会话的 length 不再误作种子边界,避免非 fork 会话代币漏计。
     // v7→v8(issue #77):折叠计入 compaction/summary(压缩摘要调用,此前漏计);
     // 升版本触发宿主对旧 checkpoint 全量重放,历史摘要调用量随之补齐。
-    stateVersion: 8,
+    // v8→v9(issue #109):默认回退补齐峰谷档位，旧金额 checkpoint 需按事件重放。
+    stateVersion: 9,
     init: () => ({ provider: 'deepseek', model: 'default', totals: zeroBuckets(), byModel: {}, byProviderModel: {}, last: null, createdAt: 0, seedEndSeq: -1, shadow: emptyShadow(), seedLength: -1, seedDeducted: false, recent: [] }),
     apply(state, event) {
       // 兼容旧 checkpoint 的缺字段(版本升级前持久化的 v5 状态):缺省回落。
@@ -928,6 +931,7 @@ async function queryBalance(ctx, locale) {
 
 /** 扩展价格表目录(内置只读;provider → family → model → 价格)。 */
 const PRICE_CATALOG = buildPriceCatalog()
+const PRICE_CATALOG_CNY = buildPriceCatalog('CNY')
 
 /**
  * 宿主机 IANA 时区名(issue #74):「今日/本月」的日键按宿主机进程时区
@@ -982,13 +986,8 @@ async function buildState(ledger, balance = emptyBalance(), goQuota = emptyGoQuo
   {
     const credentials = ctx?.get?.('credentials')
     const names = new Set()
-    for (const headers of (Array.isArray(ledger.config?.customBalances) ? ledger.config.customBalances : [])
-      .map(entry => entry?.request?.headers)
-      .filter(h => h !== null && typeof h === 'object' && !Array.isArray(h))) {
-      for (const value of Object.values(headers)) {
-        if (typeof value !== 'string') continue
-        for (const match of value.matchAll(/\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g)) names.add(match[1])
-      }
+    for (const entry of (Array.isArray(ledger.config?.customBalances) ? ledger.config.customBalances : [])) {
+      for (const name of customBalanceCredentialVars(entry)) names.add(name)
     }
     for (const source of (Array.isArray(ledger.config?.gatewayQuotas?.sources) ? ledger.config.gatewayQuotas.sources : [])) {
       names.add(managementKeyVarOf(source))
@@ -1102,7 +1101,7 @@ async function buildState(ledger, balance = emptyBalance(), goQuota = emptyGoQuo
     history: ledger.history(90),
     // 密钥脱敏(v1.6.8):下发给前端的 config 不含任何明文密钥,只留空占位字符串。
     config: clientConfig,
-    priceCatalog: PRICE_CATALOG,
+    priceCatalog: ledger.config.prices?.currency === 'CNY' ? PRICE_CATALOG_CNY : PRICE_CATALOG,
     meta: {
       now,
       timezoneOffsetMinutes: -new Date(now).getTimezoneOffset(),
@@ -1439,9 +1438,7 @@ function createService(ctx, ledger) {
     const entries = customBalanceConfigs()
     for (const key of Object.keys(customBalanceCaches)) {
       const index = Number(key)
-      const headers = entries[index]?.request?.headers
-      if (headers === null || typeof headers !== 'object' || Array.isArray(headers)) continue
-      const uses = Object.values(headers).some(value => typeof value === 'string' && value.includes(`{{${varName}}}`))
+      const uses = customBalanceCredentialVars(entries[index]).includes(varName)
       if (uses) customBalanceCaches[index] = { fetchedAt: 0, value: emptyCustomBalance() }
     }
   }
@@ -1584,10 +1581,24 @@ function createService(ctx, ledger) {
       codingPlanCaches[id] = { fetchedAt: Date.now(), value: emptyCodingPlan() }
       return
     }
-    // SCNet 无 API 额度端点(issue #26):按官方 Credits 抵扣表对本地账本同步估算——
-    // 纯本地计算开销可忽略,跳过缓存间隔,每次状态组装都随账本最新数据重算。
+    // SCNet 优先读取同一账本目录的有效控制台快照，否则沿用本地估算。
+    // 每次状态组装重读文件；快照 fetchedAt 保留真实采集时间，不冒充刚完成查询。
     if (id === 'scnet') {
-      const result = scnetTokenPlanWindows(ledger.days ?? {}, config, Date.now())
+      const now = Date.now()
+      const configAtRead = ledger.config
+      const snapshot = await readScnetSnapshot(join(dirname(ledger.path), 'scnet_official.json'), config, now, localeOf(ledger.config))
+      // 读取期间可能关闭来源或切换周期/语言，旧结果不能覆盖新配置生成的状态。
+      if (configAtRead !== ledger.config) return ensureCodingPlan(id, force)
+      if (snapshot !== null) {
+        codingPlanCaches[id] = {
+          fetchedAt: now,
+          value: { status: 'ok', message: '', ...snapshot },
+        }
+        return
+      }
+      const enabledPlans = enabledPlanSetOf(ledger.config)
+      const result = scnetTokenPlanWindows(ledger.days ?? {}, config, Date.now(),
+        (provider, model) => billingClassOf(provider, model, ledger.config.planBilling, enabledPlans, ledger.config.prices) === 'plan')
       codingPlanCaches[id] = {
         fetchedAt: Date.now(),
         value: result === null
@@ -1599,7 +1610,9 @@ function createService(ctx, ledger) {
     // 千问 Token Plan(issue #78)与 SCNet 同型:平台无 API-Key 化额度端点(额度仅
     // 控制台可见,网关需 cookie+sec_token),按官方 Credits 抵扣率本地估算,跳过缓存间隔。
     if (id === 'qwen') {
-      const result = qwenTokenPlanWindows(ledger.days ?? {}, config, Date.now())
+      const enabledPlans = enabledPlanSetOf(ledger.config)
+      const result = qwenTokenPlanWindows(ledger.days ?? {}, config, Date.now(),
+        (provider, model) => billingClassOf(provider, model, ledger.config.planBilling, enabledPlans, ledger.config.prices) === 'plan')
       codingPlanCaches[id] = {
         fetchedAt: Date.now(),
         value: result === null
@@ -1650,9 +1663,10 @@ function createService(ctx, ledger) {
     await task
   }
 
-  /** 按需刷新全部已启用 coding plan 额度(并行)。 */
+  /** 按需并行刷新 SCNet 以外的 coding plan；SCNet 在 build 中单独等待。 */
   const ensureCodingPlans = async (force = false) => {
-    await Promise.all(CODING_PLAN_PROVIDER_IDS.map(id => ensureCodingPlan(id, force)))
+    // SCNet 的有界本地文件读取在 build 中等待，不混入远程额度的后台刷新。
+    await Promise.all(CODING_PLAN_PROVIDER_IDS.filter(id => id !== 'scnet').map(id => ensureCodingPlan(id, force)))
   }
 
   const ensureGatewayQuota = async (source, force = false) => {
@@ -1737,6 +1751,7 @@ function createService(ctx, ledger) {
     kick(goQuotaCache.fetchedAt > 0, () => ensureGoQuota(false))
     kick(Object.values(customBalanceCaches).some(cache => (cache?.fetchedAt ?? 0) > 0), () => ensureCustomBalance(false))
     kick(Object.values(codingPlanCaches).some(cache => (cache?.fetchedAt ?? 0) > 0), () => ensureCodingPlans(false))
+    pending.push(ensureCodingPlan('scnet', false))
     const enabledGatewaySources = gatewaySourceConfigs().filter(source => source?.enabled !== false)
     const gatewayWarm = enabledGatewaySources.length === 0
       || enabledGatewaySources.every(source => gatewayCacheHasLkg(gatewayQuotaCaches[source.id], source))
@@ -2410,6 +2425,13 @@ export async function migrateCustomBalanceHeaderSecrets(ctx, ledger) {
   const resolvedVars = new Map()
   for (const item of found) {
     const key = `${item.entryIndex}:${item.headerName}`
+    // 混合明文/占位符不能整体迁为另一层引用，否则动态部分不再展开。
+    // 保留运行期原值并提示拆为纯凭据引用，stripSecrets 负责不落盘、不下发。
+    if (/\{\{\s*[A-Za-z_][A-Za-z0-9_]*\s*\}\}/.test(item.value)) {
+      pending.push(item.varName)
+      resolvedVars.set(key, null)
+      continue
+    }
     if (credentials === undefined) { pending.push(item.varName); resolvedVars.set(key, null); continue }
     let info = { configured: false, writable: false }
     try {
@@ -2467,6 +2489,27 @@ export async function migrateCustomBalanceHeaderSecrets(ctx, ledger) {
   return { imported, pending }
 }
 
+const DEFAULT_PRICE_MIGRATION = 'default-peak-price-v1'
+const DEFAULT_PRICE_MIGRATION_PENDING = 'default-peak-price-pending-v1'
+const SEPTEMBER_PRICE_MIGRATION = 'deepseek-september-2026-prices-v1'
+const SEPTEMBER_PRICE_PENDING = 'deepseek-september-2026-prices-pending-v1'
+
+function prepareSeptemberPrices(ledger) {
+  if (ledger.migrations.includes(SEPTEMBER_PRICE_MIGRATION) || ledger.migrations.includes(SEPTEMBER_PRICE_PENDING)) return
+  const changed = upgradeDeepSeekPriceTable(ledger.config.prices)
+  ledger.migrations.push(changed.length > 0 ? SEPTEMBER_PRICE_PENDING : SEPTEMBER_PRICE_MIGRATION)
+  ledger.scheduleWrite()
+}
+
+function prepareDefaultPeakPrice(ledger) {
+  if (ledger.migrations.includes(DEFAULT_PRICE_MIGRATION) || ledger.migrations.includes(DEFAULT_PRICE_MIGRATION_PENDING)) return
+  if (repairDefaultPeakPrice(ledger.config.prices)) {
+    if (!ledger.migrations.includes(DEFAULT_PRICE_MIGRATION_PENDING)) ledger.migrations.push(DEFAULT_PRICE_MIGRATION_PENDING)
+    // 同步修正新调用和投影使用的价格；重放若被退出打断，pending 随账本保存后可重试。
+    ledger.scheduleWrite()
+  }
+}
+
 /**
  * 启动期历史导入(issue #27):先做按模型回填,再在**本插件首次启动**(config
  * 标记 legacyAutoImportedAt 为 0)时自动导入一次安装前历史——用户无需手动触
@@ -2475,6 +2518,15 @@ export async function migrateCustomBalanceHeaderSecrets(ctx, ledger) {
  * @param sessionsRoot - 宿主会话根目录($DSH_HOME/sessions)。
  */
 export async function runStartupImports(ledger, sessionsRoot) {
+  prepareDefaultPeakPrice(ledger)
+  prepareSeptemberPrices(ledger)
+  const needsDefaultPriceMigration = !ledger.migrations.includes(DEFAULT_PRICE_MIGRATION)
+  const defaultPriceRepaired = ledger.migrations.includes(DEFAULT_PRICE_MIGRATION_PENDING)
+  const oldPrices = defaultPriceRepaired ? structuredClone(ledger.config.prices) : null
+  if (oldPrices) {
+    const { cacheHit, cacheMiss, output } = oldPrices.default
+    oldPrices.default = { cacheHit, cacheMiss, output }
+  }
   const filled = await backfillLegacyLedger(ledger, sessionsRoot)
   if (filled.days > 0 || filled.sessions > 0 || filled.titles > 0) {
     const extras = [
@@ -2623,6 +2675,57 @@ export async function runStartupImports(ledger, sessionsRoot) {
     ledger.config.legacyAutoImportedAt = Date.now()
     ledger.scheduleWrite()
   }
+  if (needsDefaultPriceMigration) {
+    if (defaultPriceRepaired) {
+      const options = { mode: ledger.config.priceMatch, overrides: ledger.config.priceOverrides }
+      const stats = await recomputeLedgerPricingBasis(ledger, sessionsRoot, key => {
+        const sep = key.indexOf(':')
+        const provider = sep > 0 ? key.slice(0, sep) : 'deepseek'
+        const model = sep > 0 ? key.slice(sep + 1) : key
+        // 唯一发生变化的是 default；明确命中的模型及自定义映射不受重算影响。
+        const before = providerPriceEntryFor(provider, model, oldPrices, options)
+        const after = providerPriceEntryFor(provider, model, ledger.config.prices, options)
+        return JSON.stringify(before) !== JSON.stringify(after)
+      })
+      splitLedgerApiCost(ledger)
+      console.log(`[dsh-cost-meter] 已补齐默认价格峰谷档位，按日志重算 ${stats.recostedSessions} 个会话；跳过 ${stats.skippedSessions} 个覆盖不全的会话`)
+    }
+    ledger.migrations = ledger.migrations.filter(marker => marker !== DEFAULT_PRICE_MIGRATION_PENDING)
+    ledger.migrations.push(DEFAULT_PRICE_MIGRATION)
+    ledger.scheduleWrite()
+  }
+  // 新识别的千问订阅别名同步更新历史 API/订阅金额，token 与原始 provider 键保留。
+  if (!ledger.migrations.includes('qwen-provider-split-v1')) {
+    splitLedgerApiCost(ledger)
+    ledger.migrations.push('qwen-provider-split-v1')
+    ledger.scheduleWrite()
+  }
+  if (!ledger.migrations.includes('scnet-provider-split-v1')) {
+    splitLedgerApiCost(ledger)
+    ledger.migrations.push('scnet-provider-split-v1')
+    ledger.scheduleWrite()
+  }
+  if (ledger.migrations.includes(SEPTEMBER_PRICE_PENDING)) {
+    const options = { mode: ledger.config.priceMatch, overrides: ledger.config.priceOverrides }
+    const boundaries = new Set([FLASH_PRICE_EFFECTIVE_AT, PRO_FLASH_ROUTING_EFFECTIVE_AT])
+    const stats = await recomputeLedgerPricingBasis(ledger, sessionsRoot, (key, date) => {
+      const sep = key.indexOf(':')
+      const provider = sep > 0 ? key.slice(0, sep) : 'deepseek'
+      const model = sep > 0 ? key.slice(sep + 1) : key
+      const resolved = providerPriceEntryFor(provider, model, ledger.config.prices, options)
+      if (resolved.billingMode !== 'deepseek-peak') return false
+      return (resolved.entry?.rateHistory ?? []).some(period => {
+        if (!boundaries.has(period.before)) return false
+        const at = new Date(period.before)
+        const day = `${at.getFullYear()}-${String(at.getMonth() + 1).padStart(2, '0')}-${String(at.getDate()).padStart(2, '0')}`
+        return date >= day
+      })
+    })
+    ledger.migrations = ledger.migrations.filter(marker => marker !== SEPTEMBER_PRICE_PENDING)
+    ledger.migrations.push(SEPTEMBER_PRICE_MIGRATION)
+    ledger.scheduleWrite()
+    console.log(`[dsh-cost-meter] 已应用 DeepSeek 9 月新定价，按完整日志更新 ${stats.recostedSessions} 个会话；跳过 ${stats.skippedSessions} 个覆盖不全的会话`)
+  }
 }
 
 /**
@@ -2631,6 +2734,9 @@ export async function runStartupImports(ledger, sessionsRoot) {
  */
 export function apply(ctx) {
   const ledger = Ledger.open()
+  // 必须先于监听器/投影注册，避免延迟历史修复期间的新调用仍使用旧默认谷价。
+  prepareDefaultPeakPrice(ledger)
+  prepareSeptemberPrices(ledger)
   console.log(`[dsh-cost-meter] 已加载,账本:${ledger.path}`)
 
   // 卸载/退出前最终落盘。
@@ -2674,6 +2780,8 @@ export function apply(ctx) {
   // 指纹窗口去重:包装层样本改挂上游 id 后,与上游真实流按 (model, 五桶指纹)
   // 10s 窗互斥入账,无论到达顺序只记一次;包装层单链照常入账(不再漏计)。
   const usageDeduper = createUsageDeduper()
+  // 记忆插件等可创建隔离的 llm 服务；账本是全局观察者，须跨服务作用域接收用量。
+  // 子会话仍按自己的 sessionId 入账；无 sessionId 的后台调用只进入日/月总计。
   ctx.on('llm/stream', createLlmStreamBilling({
     account: (usage, model, sessionId, atMs, provider) => {
       const buckets = {
@@ -2689,7 +2797,7 @@ export function apply(ctx) {
       if (effective === null) return
       ledger.account(buckets, model, sessionId, atMs, effective)
     },
-  }))
+  }), { global: true })
 
   // costUsage 投影:向会话历史页/推送帧提供 token 桶(客户端计价)。
   ctx.inject(['sessionProjections'], (projectionCtx) => {

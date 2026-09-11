@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import {
   capabilityProfileAxisMeasuredAt,
   createCapabilityProfileStore,
@@ -11,6 +12,8 @@ import {
 } from './vision-capability-benchmark.js'
 import { resolveVisionCredential } from './vision-capability-identity.js'
 import { redactDiagnosticText } from './diagnostic-redaction.js'
+import { wireSessionAffinityId } from './session-affinity.js'
+import { streamWithVisionSessionAffinity } from './session-affinity-runtime.js'
 import {
   hardenCapabilityBenchmarkFixture,
   verifyAndStripBenchmarkVisualProof,
@@ -248,6 +251,14 @@ export function createExactCapabilityInvoker(ctx, core, candidate, config, optio
     core.callOpenAICompatible(provider, messages, callOptions))
   const streamExact = options.streamExact ?? ((callOptions) => ctx.llm.stream(callOptions))
   const now = typeof options.now === 'function' ? options.now : Date.now
+  // Benchmarks need routing affinity but are not DSH Sessions. Keep the two
+  // identities separate: direct transports receive affinityId, while Host
+  // adapters run inside the scoped wire compatibility boundary without a fake
+  // GenerateOptions.sessionId that session-aware middleware could mistake for
+  // a persisted conversation.
+  const requestedAffinityId = wireSessionAffinityId(options.affinityId)
+  const benchmarkAffinityId = requestedAffinityId ??
+    `vision-benchmark-${(typeof options.randomUUID === 'function' ? options.randomUUID() : randomUUID())}`
   const prepared = new Map()
 
   const prepareFixture = async (fixture) => {
@@ -294,6 +305,7 @@ export function createExactCapabilityInvoker(ctx, core, candidate, config, optio
           callDirect(exactHttpProvider, openAIMessages(assets.png, assets.prompt), {
             maxTokens: benchmarkMaxTokensForProvider(exactHttpProvider),
             signal: callSignal,
+            affinityId: benchmarkAffinityId,
             resolveCredential: (ref) => resolvedCredentialValue(ctx, ref),
           }),
           fixtureTimeoutMs,
@@ -318,14 +330,14 @@ export function createExactCapabilityInvoker(ctx, core, candidate, config, optio
         const started = Number(now())
         try {
           output = await withHardDeadline(
-            collectStreamText(streamExact({
+            collectStreamText(streamWithVisionSessionAffinity(benchmarkAffinityId, () => streamExact({
               provider: candidate.provider,
               model: candidate.model,
               messages: assets.messages,
               maxTokens: DEFAULT_BENCHMARK_MAX_TOKENS,
               reasoningEffort: undefined,
               signal: callSignal,
-            })),
+            }))),
             fixtureTimeoutMs,
             'capability benchmark adapter fixture timed out',
           )

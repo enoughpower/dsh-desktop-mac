@@ -20,7 +20,7 @@
  * 全部为纯函数(可单测);持久化与网络在宿主侧(store.js / index.js)。
  */
 
-import { CODING_PLAN_PROVIDER_IDS } from './coding-plans.js'
+import { CODING_PLAN_PROVIDER_IDS, QWEN_TOKEN_PLAN_PROVIDER_IDS, SCNET_TOKEN_PLAN_PROVIDER_IDS } from './coding-plans.js'
 import { canonModelId } from './pricing.js'
 
 /** Plan 统计支持的提供商 id:9 家 Coding Plan + OpenCode Go。 */
@@ -29,6 +29,8 @@ export const PLAN_PROVIDER_IDS = [...CODING_PLAN_PROVIDER_IDS, 'go']
 /** 请求 provider 名 → Plan 提供商 id 的别名归并(路由渠道 zen/opencode 都是 Go)。 */
 export const PLAN_PROVIDER_ALIASES = {
   go: ['go', 'zen', 'opencode', 'opencode-go'],
+  qwen: QWEN_TOKEN_PLAN_PROVIDER_IDS,
+  scnet: SCNET_TOKEN_PLAN_PROVIDER_IDS,
 }
 
 /** 各 Plan 提供商的默认计费类别(auto = 跟随该家启用开关)。 */
@@ -558,4 +560,3 @@ export function buildPlanStats({ days, hourBuckets, samples, codingPlans, goQuot
   collect('go', goQuota?.status, goQuota ?? undefined)
   return { generatedAt: now, providers }
 }
-

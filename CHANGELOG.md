@@ -90,4 +90,16 @@
   - dsh-pocket 1.14.5 → 2.10.3。
   - README（中/英）同步插件版本号。
 
+## 2026-09-11
+
+- **升级**：`@deepseek-ai/dsh` 0.1.2-rc.1 → 0.1.5-rc.2（应用版本 1.0.1 → 1.0.2）。
+- **升级内置插件**：
+  - dsh-cost-meter 1.7.10 → 1.7.20。
+  - dsh-pocket 2.10.3 → 2.10.6。
+  - dsh-vision-router 2.1.2 → 2.1.5（同步其新增的 client-modules 行 `inject: [webServer]`
+    activation 补丁，规避 0.1.5 的 webServer service-access 竞态）。
+  - dsh-skills 0.1.1 与 @opendsh/dsh-plugin-setting-mcp 0.1.2 已是最新版本；
+    @frostgao/dsh-theme-blackgold 未发布到 npm，保持 1.0.0。
+- README（中/英）同步核心与插件版本号。
+
 

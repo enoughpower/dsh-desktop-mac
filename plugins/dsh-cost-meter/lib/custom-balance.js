@@ -7,9 +7,16 @@ import { credentialRef } from '@deepseek-ai/dsh-credentials'
 // coding-plans → custom-balance → store → plan-billing → coding-plans 的
 // ESM 环上再加一条边,DSH Desktop 的加载顺序下爆发 TDZ。net.js 是零本地
 // 依赖底层,从它导入即断环。
-import { fetchWithRetry, looksLikeSecretHeaderValue } from './net.js'
+import { fetchWithRetry, looksLikeSecretHeaderValue, readJsonBounded } from './net.js'
+import { ALIYUN_BALANCE_CREDENTIAL_VARS, queryAliyunBalance } from './aliyun-balance.js'
 
 export const CUSTOM_BALANCE_ADAPTER_ID = 'custom'
+
+export function customBalanceCredentialVars(entry) {
+  if (entry?.adapter === 'aliyun') return [...ALIYUN_BALANCE_CREDENTIAL_VARS]
+  return [...new Set(Object.values(entry?.request?.headers ?? {}).flatMap(value =>
+    typeof value === 'string' ? [...value.matchAll(/\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g)].map(match => match[1]) : []))]
+}
 
 /**
  * 按点路径取响应 JSON 的字段(v1.6.8 加自有属性守卫)。
@@ -143,6 +150,7 @@ export async function queryCustomBalance(ctx, config) {
     error.soft = true
     throw error
   }
+  if (custom.adapter === 'aliyun') return queryAliyunBalance(ctx, config)
   const request = custom.request
   if (request === null || typeof request !== 'object' || typeof request.url !== 'string' || request.url.length === 0) {
     throw new Error('customBalance.request.url is required')
@@ -200,27 +208,29 @@ export async function queryCustomBalance(ctx, config) {
     throw new Error(`custom balance endpoint redirected (HTTP ${String(response.status)}); redirects are refused to avoid forwarding credentials to another host`)
   }
   if (!response.ok) {
+    try { await response.body?.cancel?.() } catch { /* 清理失败不掩盖 HTTP 错误。 */ }
     throw new Error(`custom balance HTTP ${String(response.status)}`)
   }
-  const data = await response.json()
+  const data = await readJsonBounded(response)
   const extract = custom.extract ?? {}
   // 空值感知(B-3):extractByRule 失败返回 null,而 Number(null) === 0 会
   // 蒙混过 isFinite 守卫——提取失败绝不能伪造成 remaining:0 的「成功」。
   const rawRemaining = extractByRule(data, extract.remaining)
-  if (rawRemaining === null || !Number.isFinite(Number(rawRemaining))) {
+  const remaining = toStrictNumber(rawRemaining)
+  if (!Number.isFinite(remaining)) {
     throw new Error('custom balance extract.remaining is missing or not numeric')
   }
-  const maxBudget = extract.maxBudget !== undefined ? extractByRule(data, extract.maxBudget) : null
-  const spend = extract.spend !== undefined ? extractByRule(data, extract.spend) : null
+  const maxBudget = toStrictNumber(extract.maxBudget !== undefined ? extractByRule(data, extract.maxBudget) : null)
+  const spend = toStrictNumber(extract.spend !== undefined ? extractByRule(data, extract.spend) : null)
   const unit = typeof custom.unit === 'string' && custom.unit.length > 0
     ? custom.unit
     : (typeof extract.unit === 'string' && extract.unit.length > 0 ? extract.unit : 'USD')
   return {
     label: typeof custom.label === 'string' && custom.label.length > 0 ? custom.label : 'Custom',
     unit,
-    remaining: Number(rawRemaining),
-    maxBudget: maxBudget !== null && Number.isFinite(Number(maxBudget)) ? Number(maxBudget) : null,
-    spend: spend !== null && Number.isFinite(Number(spend)) ? Number(spend) : null,
+    remaining,
+    maxBudget: Number.isFinite(maxBudget) ? maxBudget : null,
+    spend: Number.isFinite(spend) ? spend : null,
   }
 }
 

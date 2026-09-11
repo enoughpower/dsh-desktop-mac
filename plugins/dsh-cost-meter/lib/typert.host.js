@@ -52,6 +52,12 @@ const priceTierSchema = z.object({
   reasoning: num.optional(),
 })
 
+const rateHistorySchema = priceTierSchema.extend({
+  before: z.string(),
+  offPeak: priceTierSchema.optional(),
+  peak: priceTierSchema.optional(),
+})
+
 const providerPriceSchema = z.object({
   input: num.optional(),
   cachedInput: num.optional(),
@@ -76,6 +82,7 @@ const catalogEntrySchema = providerPriceSchema.extend({
   offPeak: priceTierSchema.optional(),
   peak: priceTierSchema.optional(),
   legacyBase: priceTierSchema.optional(),
+  rateHistory: z.array(rateHistorySchema).max(16).optional(),
 })
 
 const priceSchema = z.object({
@@ -88,6 +95,7 @@ const priceSchema = z.object({
   peak: priceTierSchema.optional(),
   legacy: z.boolean().optional(),
   legacyBase: priceTierSchema.optional(),
+  rateHistory: z.array(rateHistorySchema).max(16).optional(),
   sourceUrl: z.string().optional(),
   checkedAt: z.string().optional(),
   notes: z.string().optional(),
@@ -119,6 +127,10 @@ const configSchema = z.object({
   hideTodayCost: z.boolean().optional(),
   // 「含 Plan 总额」全局开关(v1.6.0):开启后全部金额展示按总等值(cost)计。
   showTotalWithPlan: z.boolean().optional(),
+  sidebarSimple: z.boolean().optional(),
+  sidebarSimplePromptSeen: z.boolean().optional(),
+  sidebarStyle: z.enum(['standard', 'compact']).optional(),
+  priceMatchDismissed: z.array(z.string()).optional(),
   // 安装前历史自动导入完成时刻(issue #27,内部标记;0/缺席 = 尚未跑过)。
   legacyAutoImportedAt: num.optional(),
   peakStyle: z.enum(['compact', 'classic']).optional(),
@@ -184,6 +196,7 @@ const configSchema = z.object({
     keySource: z.string().optional(),
   }),
   customBalance: z.object({
+    adapter: z.enum(['custom', 'aliyun']).optional(),
     enabled: z.boolean(),
     label: z.string(),
     labelEn: z.string().optional(),
@@ -202,6 +215,7 @@ const configSchema = z.object({
   // 多配置形态(v1.7.0,issue #79):自定义 Provider 余额多条并行,数组为运行期
   // 真源;customBalance 单配置键仅为旧客户端兼容保留(= entries[0] 的镜像)。
   customBalances: z.array(z.object({
+    adapter: z.enum(['custom', 'aliyun']).optional(),
     enabled: z.boolean(),
     label: z.string(),
     labelEn: z.string().optional(),

@@ -270,7 +270,11 @@ export function parseAntigravityQuota(payload, ctx = {}) {
   for (let gi = 0; gi < groups.length; gi++) {
     const group = groups[gi]
     if (group === null || typeof group !== 'object' || Array.isArray(group)) continue
-    const groupId = slug(pickField(group, 'groupId', 'group_id', 'id', 'name') ?? `group-${gi}`)
+    const explicitId = pickField(group, 'groupId', 'group_id', 'id')
+    const rawGroupTitle = pickField(group, 'displayName', 'display_name', 'name') ?? explicitId
+    let groupTitle = rawGroupTitle ? String(rawGroupTitle).replace(/\s+models$/i, '').trim() : `group-${gi}`
+    if (groupTitle.toLowerCase().includes('claude') && groupTitle.toLowerCase().includes('gpt')) groupTitle = 'Claude / GPT'
+    const groupId = slug(explicitId ?? groupTitle)
     const buckets = Array.isArray(group.buckets) ? group.buckets : []
     let added = 0
     for (const bucket of buckets) {
@@ -288,7 +292,7 @@ export function parseAntigravityQuota(payload, ctx = {}) {
       const percent = clampPct((1 - fraction) * 100)
       windows.push(makeWindow(
         id,
-        `${groupId} · ${meta.label}`,
+        `${groupTitle} · ${meta.label}`,
         percent,
         absoluteResetAt(pickField(bucket, 'resetTime', 'reset_time', 'resetTime')),
         meta.periodHours,
@@ -403,8 +407,8 @@ function codexWindowMeta(seconds) {
     ? seconds
     : typeof seconds === 'string' && seconds.trim() !== '' ? Number(seconds.trim()) : NaN
   if (!Number.isFinite(value) || value <= 0) return null
-  if (value === FIVE_HOUR_SECONDS) return { id: 'five-hour', label: '5 小时', periodHours: 5 }
-  if (value === WEEK_SECONDS) return { id: 'weekly', label: '每周', periodHours: 168 }
+  if (value === FIVE_HOUR_SECONDS) return { id: 'five-hour', label: '5h', periodHours: 5 }
+  if (value === WEEK_SECONDS) return { id: 'weekly', label: '周', periodHours: 168 }
   if (value >= MIN_MONTH_SECONDS && value <= MAX_MONTH_SECONDS) {
     return { id: 'monthly', label: '月度', periodHours: Math.round(value / 3600) }
   }
@@ -453,15 +457,16 @@ export function parseCodexUsage(payload, ctx = {}) {
     const resetAt = absoluteResetAt(pickField(window, 'reset_at', 'resetAt'))
       || relativeResetAt(pickField(window, 'reset_after_seconds', 'resetAfterSeconds'), now())
     seen.add(id)
-    windows.push(makeWindow(id, `${groupLabel} · ${meta.label}`, percent, resetAt, meta.periodHours, scope))
+    // 组标签为空时直接用窗口标签(主限额组不叠加前缀,窄栏标签列放不下会竖排换行)。
+    windows.push(makeWindow(id, groupLabel ? `${groupLabel} · ${meta.label}` : meta.label, percent, resetAt, meta.periodHours, scope))
   }
 
   const source = payload === null || typeof payload !== 'object' ? {} : payload
 
   const mainGroup = pickField(source, 'rate_limit', 'rateLimit')
   if (mainGroup !== null && typeof mainGroup === 'object' && !Array.isArray(mainGroup)) {
-    pushWindow('primary', 'account', pickField(mainGroup, 'primary_window', 'primaryWindow'), 0, '主力')
-    pushWindow('primary', 'account', pickField(mainGroup, 'secondary_window', 'secondaryWindow'), 1, '主力')
+    pushWindow('primary', 'account', pickField(mainGroup, 'primary_window', 'primaryWindow'), 0, '')
+    pushWindow('primary', 'account', pickField(mainGroup, 'secondary_window', 'secondaryWindow'), 1, '')
   }
 
   const codeReviewGroup = pickField(source, 'code_review_rate_limit', 'codeReviewRateLimit')

@@ -32,8 +32,13 @@ export function isTransientFetchError(error) {
   return error instanceof TypeError && String(error.message ?? '').includes('fetch failed')
 }
 
-/** @param {number} ms */
-const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
+/** 退避也响应调用方取消，及时清理计时器与监听器。 */
+const sleep = (ms, signal) => new Promise((resolve, reject) => {
+  const abort = () => { clearTimeout(timer); reject(signal.reason) }
+  const timer = setTimeout(() => { signal?.removeEventListener('abort', abort); resolve() }, ms)
+  if (signal?.aborted) abort()
+  else signal?.addEventListener('abort', abort, { once: true })
+})
 
 /**
  * 带重试的 fetch:仅对瞬时网络错误自动重试(默认共 4 次尝试,退避 300/600/1200ms,
@@ -50,7 +55,8 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 export async function fetchWithRetry(url, init = {}, { attempts = 4, backoffMs = 300, timeoutMs = 0, fetchImpl = fetch } = {}) {
   const request = typeof fetchImpl === 'function' ? fetchImpl : fetch
   for (let attempt = 1; ; attempt++) {
-    if (attempt > 1) await sleep(Math.min(1500, backoffMs * 2 ** (attempt - 2)))
+    init.signal?.throwIfAborted()
+    if (attempt > 1) await sleep(Math.min(1500, backoffMs * 2 ** (attempt - 2)), init.signal)
     let perAttempt = init
     if (timeoutMs > 0) {
       // 超时信号不得吞掉调用方的取消信号:两者并存时用 AbortSignal.any 组合
@@ -64,9 +70,37 @@ export async function fetchWithRetry(url, init = {}, { attempts = 4, backoffMs =
     try {
       return await request(url, perAttempt)
     } catch (error) {
+      if (init.signal?.aborted) throw init.signal.reason
       if (!isTransientFetchError(error) || attempt >= attempts) throw error
     }
   }
+}
+
+/** 流式限制实际响应体，不依赖可能缺失或不准确的 Content-Length。 */
+export async function readJsonBounded(response, maxBytes = 262144) {
+  const tooLarge = () => Object.assign(new Error('response body is too large'), { code: 'RESPONSE_TOO_LARGE' })
+  const parse = text => {
+    try { return JSON.parse(text) } catch { throw new Error('response body is not valid JSON') }
+  }
+  if (Number(response.headers?.get?.('content-length')) > maxBytes) {
+    try { await response.body?.cancel?.() } catch { /* 清理失败不掩盖长度错误。 */ }
+    throw tooLarge()
+  }
+  if (response.body?.[Symbol.asyncIterator]) {
+    const chunks = []
+    let bytes = 0
+    for await (const chunk of response.body) {
+      const buffer = Buffer.from(chunk)
+      bytes += buffer.length
+      if (bytes > maxBytes) throw tooLarge()
+      chunks.push(buffer)
+    }
+    return parse(Buffer.concat(chunks).toString('utf8'))
+  }
+  // 兼容没有流接口的 adapter/测试替身；标准 Node Response 均走上面的有界流读取。
+  const text = typeof response.text === 'function' ? await response.text() : JSON.stringify(await response.json())
+  if (typeof text !== 'string' || Buffer.byteLength(text, 'utf8') > maxBytes) throw tooLarge()
+  return parse(text)
 }
 
 // ── 请求头密钥判定(v1.7.9 自 store.js 迁入) ─────────────────────────────
@@ -76,7 +110,7 @@ export async function fetchWithRetry(url, init = {}, { attempts = 4, backoffMs =
 // store → plan-billing → coding-plans」的 ESM 环(v1.7.6 引入环边 custom-balance
 // → store;v1.7.8 在 DSH Desktop 的加载顺序下爆发 TDZ:
 // Cannot access 'CODING_PLAN_PROVIDER_IDS' before initialization)。
-// 函数语义与迁移前逐位一致,仅搬家破环。
+// 共享判定避免各条持久化、回传和请求路径的安全规则分叉。
 
 /** {{VAR}} 占位符形态(与 custom-balance.js resolveTemplateString 同一文法)。 */
 const HEADER_PLACEHOLDER_RE = /\{\{\s*[A-Za-z_][A-Za-z0-9_]*\s*\}\}/
@@ -98,8 +132,12 @@ const KNOWN_KEY_VALUE_RE = /^(sk-[A-Za-z0-9_-]|rk-[A-Za-z0-9_-]|gsk_[A-Za-z0-9]|
  */
 export function looksLikeSecretHeaderValue(name, value) {
   if (typeof value !== 'string' || value.length === 0) return false
-  // 占位符是安全引用(值本身是变量名,不是密钥),任何路径都原样保留。
-  if (HEADER_PLACEHOLDER_RE.test(value)) return false
+  // 只能豁免纯引用及常见认证前缀；追加一个占位符不能使已有明文密钥绕过脱敏。
+  if (HEADER_PLACEHOLDER_RE.test(value)) {
+    const literal = value.replace(new RegExp(HEADER_PLACEHOLDER_RE.source, 'g'), '').trim()
+    if (/^(?:(?:bearer|basic|token)\s*)?[:\s]*$/i.test(literal)) return false
+    value = literal
+  }
   if (SENSITIVE_HEADER_NAME_RE.test(String(name ?? ''))) return true
   const trimmed = value.trim()
   if (/^(bearer|basic|token)\s+\S/i.test(trimmed)) return true

@@ -1,12 +1,21 @@
 # Desktop-app overlay: dsh-vision-router — eyes for text-only DeepSeek agents.
 #
-# `dsh-vision-router` (ysr666, v2.1.2) keeps the original pixels on the vision
+# `dsh-vision-router` (ysr666, v2.1.5) keeps the original pixels on the vision
 # model side and DeepSeek as the brain: a built-in free vision chain (OVHcloud
 # anonymous, key-less) + 14 pixel-level vision tools (ground / crop / pixel-diff
 # / colors / OCR / svg-trace / cutout / html-screenshot …). It does NOT take
 # over the official llm-deepseek row below — routing takeover is controlled by
 # the plugin's own「隐身模式」switch (off by default), per the package's
 # cordis.patch.yml. Rows below mirror that bundle layer verbatim.
+#
+# DSH 0.1.5's client-modules Node half may hit the "webServer without inject"
+# service-access race when extra client bundles are installed. Mirroring the
+# package's own bundle patch, pin the existing modules row's activation
+# dependency explicitly (same row, no client-graph change).
+- id: modules
+  name: '@deepseek-ai/dsh-client-modules'
+  inject: [webServer]
+
 - insert:
     - id: vision-router
       name: 'dsh-vision-router'

@@ -35,6 +35,22 @@ export const RANDOM_UUID_POLYFILL = `<script data-dsh-pocket-polyfill="1">!funct
 导致会话列表不显示（实测 PAGEERROR: Identifier 'location' has already been declared）。
 已回退；该问题属 DSH 客户端限制（location.hostname 是 unforgeable 属性）无法安全绕过。*/</script>`;
 
+/**
+ * issue #96：dsh 0.1.1-rc.2 起，`@deepseek-ai/dsh-client-connection` 的连接层改成
+ *   const api = fixtureClient ?? transport?.createApiClient() ?? new WebApiClient()
+ * 其中 transport = globalThis.__DSH_TRANSPORT__（由 DSH 宿主 web shell 注入，本仓库
+ * 全程不创建、不引用这个全局）。桌面直连 127.0.0.1:3080 时宿主给的 transport 带
+ * createApiClient；经本代理（局域网 / 隧道域名）访问时宿主给的 transport 不带该方法
+ * → 手机上一执行就 TypeError: transport?.createApiClient is not a function，整页崩。
+ *
+ * 兜底策略：只在该方法缺失时补一个返回 null 的实现。null 会触发宿主自己那条
+ * `?? new WebApiClient()` 兜底分支，等于让连接层回到旧版本（0.1.1-rc.2 之前）的
+ * 行为。宿主自己有实现时一律不覆盖。
+ *
+ * 这是 stopgap 不是根治：真正的契约缺口在 DSH 宿主，需上游修复。
+ */
+export const TRANSPORT_API_CLIENT_SHIM = `<script data-dsh-pocket-transport-shim="1">!function(){try{var K='__DSH_TRANSPORT__',cur=globalThis[K];function patch(t){try{if(t&&typeof t==='object'&&typeof t.createApiClient!=='function'){try{Object.defineProperty(t,'createApiClient',{value:function(){return null;},writable:true,configurable:true});}catch(e){try{t.createApiClient=function(){return null;};}catch(e2){}}}}catch(e){}return t;}if(cur)patch(cur);Object.defineProperty(globalThis,K,{configurable:true,enumerable:true,get:function(){return cur;},set:function(t){cur=patch(t);}});}catch(e){}}();</script>`;
+
 const INJECT_MARK = 'data-dsh-pocket-polyfill="1"';
 
 /**
@@ -67,74 +83,10 @@ function isCompressed(headers) {
 }
 
 /**
- * DSH 客户端信任环境补丁（issue #58 的可行修法）：
- * 手机/局域网浏览器访问时 location.hostname 不是回环地址，dsh-client-connection 据此
- * 把 ctx.connection.isLoopback 判定为 false，dsh-client-ui-settings 便把 settings 镜像
- * 置为 memory 模式（不拉取 settings.describe），模型/通用设置页于是报
- * "settings are unavailable in this browser"（issue #58）。
- *
- * 与已回退的「全局 let location + Proxy」伪装方案不同，本补丁**不碰 location**——
- * 它包装 window.__ModuleLoader__，在 dsh-client-connection 模块向 Cordis 容器
- * provide('connection') 时把服务句柄的 isLoopback 强制为 true。经本代理（带 PIN 鉴权、
- * 请求头已回环化）的远程访问由此获得与本机一致的完整设置能力，会话列表回归不存在。
- *
- * 关键细节：HTML 只预加载 client-modules/client-runtime 两个 bundle（队列模式注册）；
- * connection 等插件 bundle 是 create() 启动后由加载器**动态**加载的，而 create() 会把
- * facade.load 整体替换为 live 注册函数。因此不能只包一次 load 函数——必须在 facade
- * 对象上把 load 装成访问器（getter/setter），每次赋值（队列→live 切换）都重新包装。
+ * 默认注入到经代理的 HTML 文档里：crypto.randomUUID / AbortSignal.any polyfill
+ * （非安全上下文必需）+ issue #96 的 transport.createApiClient 兜底。
  */
-const LOOPBACK_ENV_PATCH = `<script data-dsh-pocket-loopback-patch="1">!function(){try{
-var ml=window.__ModuleLoader__;
-function wrapFactory(h){
-  var of=h.factory;
-  h.factory=function(r){
-    var exp=of.apply(this,arguments);
-    if(exp&&typeof exp.apply==='function'){
-      var oa=exp.apply;
-      exp.apply=function(ctx){
-        var op=ctx&&ctx.provide;
-        if(typeof op==='function'){
-          ctx.provide=function(n,v){
-            if(n==='connection'&&v&&typeof v==='object'){
-              try{Object.defineProperty(v,'isLoopback',{value:true,writable:true,configurable:true});}catch(e){v.isLoopback=true;}
-            }
-            return op.apply(this,arguments);
-          };
-        }
-        return oa.apply(this,arguments);
-      };
-    }
-    return exp;
-  };
-}
-function wrapLoad(fn){
-  return function(h){
-    if(h&&h.id&&String(h.id).indexOf('connection')!==-1&&typeof h.factory==='function'){wrapFactory(h);}
-    return fn.call(this,h);
-  };
-}
-function wrapFacade(facade){
-  if(!facade||facade._dsh_p_w)return facade;
-  var current=wrapLoad(facade.load);
-  try{
-    Object.defineProperty(facade,'load',{
-      configurable:true,
-      get:function(){return current;},
-      set:function(fn){current=wrapLoad(fn);}
-    });
-  }catch(e){facade.load=current;}
-  facade._dsh_p_w=true;
-  return facade;
-}
-if(ml){wrapFacade(ml);}
-else{
-  var cur=undefined;
-  Object.defineProperty(window,'__ModuleLoader__',{configurable:true,enumerable:true,get:function(){return cur;},set:function(v){cur=wrapFacade(v);}});
-}
-}catch(e){}}();</script>`;
-
-/** 默认注入到经代理的 HTML 文档里：polyfill + loopback 信任环境补丁（issue #58）。 */
-export const DEFAULT_INJECT = RANDOM_UUID_POLYFILL + LOOPBACK_ENV_PATCH;
+export const DEFAULT_INJECT = RANDOM_UUID_POLYFILL + TRANSPORT_API_CLIENT_SHIM;
 
 /**
  * DSH Desktop advanced 模式不支持的提示覆盖层（issue #19）。
@@ -216,11 +168,22 @@ function createRateLimiter(cfg = {}) {
     },
   };
 }
-/** 客户端真实 IP：cf-connecting-ip（隧道，可信）优先，否则 socket 地址；不信 XFF。 */
-function clientIp(req) {
-  const cf = String(req.headers['cf-connecting-ip'] ?? '').trim();
-  if (cf) return cf;
-  return String(req.socket?.remoteAddress ?? 'unknown');
+/**
+ * 客户端真实 IP（限速与握手计数的身份键）：
+ *   - 来自本机（cloudflared 隧道回连，源地址 loopback）→ 认 cf-connecting-ip（Cloudflare 边缘写的真实客户端 IP）；
+ *   - 其余一律用 socket 源地址。
+ *
+ * 为什么不能无条件信任 cf-connecting-ip：那是**请求头**，能直连代理端口的人可以随手
+ * 伪造。隧道流量必经本机 cloudflared（源地址必为 loopback），所以把它限定在 loopback
+ * 来源既不影响隧道场景，又让「换头即换身份」的限速绕过失效。XFF 同理，始终不认。
+ */
+export function clientIp(req) {
+  const addr = String(req.socket?.remoteAddress ?? '');
+  if (classifySource(addr) === 'loopback') {
+    const cf = String(req.headers['cf-connecting-ip'] ?? '').trim();
+    if (cf) return cf;
+  }
+  return addr || 'unknown';
 }
 
 function parseCookies(header) {
@@ -795,13 +758,17 @@ export function createPocketProxy({ port = 3081, host = '0.0.0.0', upstream = DE
           req.on('data', (c) => { body += c; if (body.length > 1024) req.destroy(); });
           req.on('end', () => {
             const submitted = String(new URLSearchParams(body).get('token') ?? '');
-            if (submitted === token) {
+            // 与 cookie / ?token= 两条通道保持一致：常量时间比较 + 主 PIN 与替代令牌
+            // （临时 PIN，issue #69 钩子）任一命中即放行。原先这里是 `submitted === token`
+            // ——既会提前返回（计时侧信道可逐字节还原 PIN），又把替代令牌挡在门外。
+            const matched = acceptedTokens.find((candidate) => safeEqual(submitted, candidate));
+            if (matched !== undefined) {
               limiter?.clear(ip);
               res.writeHead(302, {
                 // 带上 dsh-pocket-auth=1：登录成功后强制重做一次浏览器会话握手，
                 // 换掉可能已过期/被撤销的 dsh web 会话 cookie（issue #77）
                 location: '/?dsh-pocket-auth=1',
-                'set-cookie': `${TOKEN_COOKIE}=${cookieFor(token, sessionKey)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${COOKIE_MAX_AGE}`,
+                'set-cookie': `${TOKEN_COOKIE}=${cookieFor(matched, sessionKey)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${COOKIE_MAX_AGE}`,
                 'cache-control': 'no-store',
               });
               res.end();

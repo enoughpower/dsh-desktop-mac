@@ -9,7 +9,7 @@
 
 import { createHash } from 'node:crypto'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
-import { fetchWithRetry } from './net.js'
+import { fetchWithRetry, readJsonBounded } from './net.js'
 import {
   GATEWAY_PROVIDER_ADAPTERS,
   canonicalGatewayProvider,
@@ -208,22 +208,45 @@ function retryAfterMs(response) {
   return Number.isFinite(date) ? Math.min(5000, Math.max(0, date - Date.now())) : 0
 }
 
+// CPA 是一个本地管理端点加上上游 Provider 的双跳链路。管理端或上游
+// 偶发过载时，只有这些暂态 HTTP 状态才适合重试；认证/策略/解析失败必须立刻报错。
+const RETRYABLE_GATEWAY_HTTP_STATUSES = new Set([408, 429, 500, 502, 503, 504])
+const GATEWAY_RESPONSE_ATTEMPTS = 2
+const GATEWAY_RETRY_DELAY_MS = 300
+
+function isRetryableGatewayStatus(status) {
+  return RETRYABLE_GATEWAY_HTTP_STATUSES.has(Number(status))
+}
+
+function gatewayRetryDelay(response) {
+  return retryAfterMs(response) || GATEWAY_RETRY_DELAY_MS
+}
+
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
+
+async function discardResponse(response) {
+  // 重试前释放未消费的错误响应，避免多账号轮询占住连接池。
+  try { await response?.body?.cancel() } catch { /* 清理失败不掩盖原始 HTTP 错误。 */ }
+}
+
 async function readJsonResponse(response, phase, { maxBytes = MAX_BODY_BYTES } = {}) {
   if (!response || typeof response.ok !== 'boolean') throw errorOf('CPA_RESPONSE_INVALID', `${phase} response is invalid`)
-  if (!response.ok) throw responseStatusError(response, phase)
-  let body
+  if (!response.ok) {
+    await discardResponse(response)
+    throw responseStatusError(response, phase)
+  }
   try {
     const length = safeNumber(headerValue(response.headers, 'content-length'))
-    if (length !== null && length > maxBytes) throw errorOf('CPA_RESPONSE_INVALID', `${phase} response is too large`)
-    body = await response.text()
+    if (length !== null && length > maxBytes) {
+      await discardResponse(response)
+      throw errorOf('CPA_RESPONSE_INVALID', `${phase} response is too large`)
+    }
+    return await readJsonBounded(response, maxBytes)
   } catch (error) {
     if (error?.code === 'CPA_RESPONSE_INVALID') throw error
-    throw errorOf('CPA_RESPONSE_INVALID', `${phase} response body could not be read`)
+    throw errorOf('CPA_RESPONSE_INVALID', error?.code === 'RESPONSE_TOO_LARGE'
+      ? `${phase} response is too large` : `${phase} response body is not readable JSON`)
   }
-  if (typeof body !== 'string' || Buffer.byteLength(body, 'utf8') > maxBytes) {
-    throw errorOf('CPA_RESPONSE_INVALID', `${phase} response is too large`)
-  }
-  try { return JSON.parse(body) } catch { throw errorOf('CPA_RESPONSE_INVALID', `${phase} response is not JSON`) }
 }
 
 export async function cpaManagementFetch(url, key, init = {}, options = {}) {
@@ -250,7 +273,7 @@ async function fetchManagement(source, path, managementKey, options = {}) {
     'Content-Type': 'application/json',
     'X-Management-Key': managementKey,
   }
-  for (let rateAttempt = 0; rateAttempt < 2; rateAttempt++) {
+  for (let attempt = 0; attempt < GATEWAY_RESPONSE_ATTEMPTS; attempt++) {
     let response
     try {
       response = await fetchWithRetry(url, { method: 'GET', headers, redirect: 'manual' }, {
@@ -261,14 +284,15 @@ async function fetchManagement(source, path, managementKey, options = {}) {
       throw errorOf('CPA_OUTER_HTTP_ERROR', 'management request failed', { status: 0 })
     }
     if (response.status >= 300 && response.status < 400) throw errorOf('CPA_REDIRECT_REFUSED', 'CPA redirect refused', { status: response.status })
-    if (response.status === 429 && rateAttempt === 0) {
-      const delay = retryAfterMs(response)
-      if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay))
+    // 管理端临时过载/限流时按 Retry-After 或短退避再试一次。
+    if (isRetryableGatewayStatus(response.status) && attempt + 1 < GATEWAY_RESPONSE_ATTEMPTS) {
+      await discardResponse(response)
+      await sleep(gatewayRetryDelay(response))
       continue
     }
     return { payload: await readJsonResponse(response, path), serverVersion: headerValue(response.headers, 'x-cpa-version') }
   }
-  throw errorOf('CPA_OUTER_HTTP_ERROR', 'management request rate limited', { status: 429 })
+  throw errorOf('CPA_OUTER_HTTP_ERROR', 'management request failed', { status: 0 })
 }
 
 /** Resolve only the management key value, never returning it to callers' state. */
@@ -408,21 +432,41 @@ async function apiCall(source, managementKey, account, request, options = {}) {
   if (projectId && request.url.includes('cloudcode-pa')) {
     body.data = request.data || JSON.stringify({ project: projectId })
   }
-  let response
-  try {
-    response = await fetchWithRetry(endpoint(source, GATEWAY_MANAGEMENT_PATHS.apiCall), {
-      method: 'POST',
-      headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'X-Management-Key': managementKey },
-      body: JSON.stringify(body),
-      redirect: 'manual',
-    }, { attempts: 2, timeoutMs: 30_000, fetchImpl })
-  } catch (error) {
-    if (error?.code) throw error
-    throw errorOf('CPA_OUTER_HTTP_ERROR', 'CPA api-call failed')
+  for (let attempt = 0; attempt < GATEWAY_RESPONSE_ATTEMPTS; attempt++) {
+    let response
+    try {
+      response = await fetchWithRetry(endpoint(source, GATEWAY_MANAGEMENT_PATHS.apiCall), {
+        method: 'POST',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'X-Management-Key': managementKey },
+        body: JSON.stringify(body),
+        redirect: 'manual',
+      }, { attempts: 2, timeoutMs: 30_000, fetchImpl })
+    } catch (error) {
+      if (error?.code) throw error
+      throw errorOf('CPA_OUTER_HTTP_ERROR', 'CPA api-call failed')
+    }
+    if (response.status >= 300 && response.status < 400) throw errorOf('CPA_REDIRECT_REFUSED', 'CPA redirect refused', { status: response.status })
+    // api-call 是副作用闸门已校验的只读额度请求；仅对暂态管理端状态重放一次。
+    if (isRetryableGatewayStatus(response.status) && attempt + 1 < GATEWAY_RESPONSE_ATTEMPTS) {
+      await discardResponse(response)
+      await sleep(gatewayRetryDelay(response))
+      continue
+    }
+    try {
+      const envelope = await readJsonResponse(response, 'api-call')
+      return normalizeInnerEnvelope(envelope, 'api-call')
+    } catch (error) {
+      // CPA 把上游 HTTP 状态装进 JSON envelope。429/5xx 同样属于暂态，
+      // 但认证、策略与格式错误绝不重试。
+      if (error?.code === 'CPA_INNER_HTTP_ERROR' && isRetryableGatewayStatus(error.status)
+        && attempt + 1 < GATEWAY_RESPONSE_ATTEMPTS) {
+        await sleep(GATEWAY_RETRY_DELAY_MS)
+        continue
+      }
+      throw error
+    }
   }
-  if (response.status >= 300 && response.status < 400) throw errorOf('CPA_REDIRECT_REFUSED', 'CPA redirect refused', { status: response.status })
-  const envelope = await readJsonResponse(response, 'api-call')
-  return normalizeInnerEnvelope(envelope, 'api-call')
+  throw errorOf('CPA_OUTER_HTTP_ERROR', 'CPA api-call retry exhausted', { status: 0 })
 }
 
 async function queryApiAccount(source, managementKey, account, options = {}) {

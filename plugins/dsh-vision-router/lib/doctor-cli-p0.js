@@ -9,6 +9,7 @@ import {
 } from './dsh-host-capabilities.js'
 import {
   DSH_SUPPORT_WINDOW,
+  DSH_VERIFICATION_EVIDENCE,
   formatDshSupportWindowLines,
   supportWindowUpgradeAdvice,
 } from './dsh-support-window.js'
@@ -57,7 +58,7 @@ export async function probeDoctorHostCapabilities({ baseUrl, fetchImpl = globalT
     if (!response.ok) {
       return {
         ok: false,
-        source: 'runtime-route-unavailable',
+        source: response.status === 401 ? 'runtime-auth-required' : 'runtime-route-unavailable',
         status: response.status,
         capabilities: unknownSnapshot(),
       }
@@ -143,6 +144,7 @@ export async function run(argv = process.argv.slice(2), io = console, env = proc
       report.hostCapabilities = probe.capabilities
       report.hostCapabilitiesSource = probe.source
       report.hostSupportWindow = DSH_SUPPORT_WINDOW
+      report.hostVerificationEvidence = DSH_VERIFICATION_EVIDENCE
       report.hostSupportAdvice = supportWindowUpgradeAdvice(probe.capabilities)
       io.log(JSON.stringify(report, null, 2))
       return code

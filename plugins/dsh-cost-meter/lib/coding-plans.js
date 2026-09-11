@@ -829,12 +829,20 @@ export function scnetPlanPeriod(nowMs, planStart) {
   return { fromKey: keyOf(start), toKeyInclusive: keyOf(last), resetsAt: last.toISOString() }
 }
 
+export const SCNET_TOKEN_PLAN_PROVIDER_IDS = ['scnet', 'scnet-tokenplan', 'scnet-token-plan']
+
+export function isScnetTokenPlanProvider(provider) {
+  const name = String(provider ?? '').trim().toLowerCase().replace(/^llm-/, '')
+  return SCNET_TOKEN_PLAN_PROVIDER_IDS.includes(name)
+}
+
 /**
- * 汇总本地账本当前计费周期的 SCNet Credits 用量(按模型名匹配抵扣表;跨 provider 归并,
- * 未匹配模型不计)。entry 为 codingPlans.scnet 配置(planCredits 必填、planStart 可选)。
+ * 汇总本地账本当前计费周期的 SCNet Credits 用量，仅计 SCNet 订阅渠道的收录模型。
+ * entry 为 codingPlans.scnet 配置(planCredits 必填、planStart 可选)。
+ * includeCall 进一步应用用户显式的 Plan/API 分类。
  * 返回 null(planCredits 非法)或 { used, total, percent, resetsAt, byModel, windows }。
  */
-export function scnetTokenPlanWindows(days, entry, nowMs) {
+export function scnetTokenPlanWindows(days, entry, nowMs, includeCall) {
   const total = Number(entry?.planCredits)
   if (!Number.isFinite(total) || total <= 0) return null
   const period = scnetPlanPeriod(nowMs, entry?.planStart)
@@ -843,7 +851,10 @@ export function scnetTokenPlanWindows(days, entry, nowMs) {
   for (const [date, day] of Object.entries(days ?? {})) {
     if (typeof date !== 'string' || date < period.fromKey || date > period.toKeyInclusive) continue
     for (const [pmKey, buckets] of Object.entries(day?.byProviderModel ?? {})) {
-      const model = pmKey.includes(':') ? pmKey.slice(pmKey.indexOf(':') + 1) : pmKey
+      const sep = pmKey.indexOf(':')
+      const provider = sep > 0 ? pmKey.slice(0, sep) : ''
+      const model = sep > 0 ? pmKey.slice(sep + 1) : pmKey
+      if (!isScnetTokenPlanProvider(provider) || (includeCall && !includeCall(provider, model))) continue
       const canon = scnetCanonModelId(model)
       const rate = SCNET_RATE_BY_CANON[canon]
       if (rate === undefined || buckets === null || typeof buckets !== 'object') continue
@@ -893,17 +904,27 @@ const QWEN_CREDIT_RATES_BY_CANON = Object.fromEntries(
   Object.entries(QWEN_CREDIT_RATES).map(([id, rate]) => [scnetCanonModelId(id), rate]),
 )
 
+// 只识别明确的订阅渠道；qianwen/dashscope 等按量渠道不能仅凭同名模型归入。
+export const QWEN_TOKEN_PLAN_PROVIDER_IDS = ['qwen', 'qwen-tokenplan', 'qianwen-tokenplan', 'qwen-token-plan', 'qianwen-token-plan']
+
+export function isQwenTokenPlanProvider(provider) {
+  const name = String(provider ?? '').trim().toLowerCase().replace(/^llm-/, '')
+  return QWEN_TOKEN_PLAN_PROVIDER_IDS.includes(name)
+}
+
 /**
  * 汇总本地账本当前计费周期(自然月,与 SCNet 同款 scnetPlanPeriod)的千问
  * Credits 用量。entry 为 codingPlans.qwen 配置:{ planCredits(必填,月度总额),
  * planStart(可选,计费周期锚日), rates(可选,模型名 → 抵扣率覆盖,键为归一模型名) }。
+ * 仅汇总千问订阅 provider；includeCall 可进一步按 Plan/API 显式配置排除调用。
  * 返回 null(planCredits 非法)或 { used, total, percent, resetsAt, byModel, windows }。
  */
-export function qwenTokenPlanWindows(days, entry, nowMs) {
+export function qwenTokenPlanWindows(days, entry, nowMs, includeCall) {
   const total = Number(entry?.planCredits)
   if (!Number.isFinite(total) || total <= 0) return null
   // 用户覆盖的抵扣率优先,内置表兜底;键与模型名均做字母数字归一比较。
-  const overrides = entry?.rates !== null && typeof entry?.rates === 'object' && !Array.isArray(entry?.rates) ? entry.rates : {}
+  const rawOverrides = entry?.rates !== null && typeof entry?.rates === 'object' && !Array.isArray(entry?.rates) ? entry.rates : {}
+  const overrides = Object.fromEntries(Object.entries(rawOverrides).map(([model, rate]) => [scnetCanonModelId(model), rate]))
   const rateOf = canon => {
     if (overrides[canon] !== undefined && overrides[canon] !== null && typeof overrides[canon] === 'object') return overrides[canon]
     return QWEN_CREDIT_RATES_BY_CANON[canon]
@@ -914,7 +935,10 @@ export function qwenTokenPlanWindows(days, entry, nowMs) {
   for (const [date, day] of Object.entries(days ?? {})) {
     if (typeof date !== 'string' || date < period.fromKey || date > period.toKeyInclusive) continue
     for (const [pmKey, buckets] of Object.entries(day?.byProviderModel ?? {})) {
-      const model = pmKey.includes(':') ? pmKey.slice(pmKey.indexOf(':') + 1) : pmKey
+      const sep = pmKey.indexOf(':')
+      const provider = sep > 0 ? pmKey.slice(0, sep) : ''
+      const model = sep > 0 ? pmKey.slice(sep + 1) : pmKey
+      if (!isQwenTokenPlanProvider(provider) || (includeCall && !includeCall(provider, model))) continue
       const canon = scnetCanonModelId(model)
       const rate = rateOf(canon)
       if (rate === undefined || buckets === null || typeof buckets !== 'object') continue

@@ -625,10 +625,10 @@ function PocketSettingsTab({ rpcCall, t }) {
 }
 
 export function apply(ctx) {
-  // 双保险：确保 connection.isLoopback 为 true（issue #58）。
-  // 主修复在代理注入的 loopback 补丁（proxy.mjs LOOPBACK_ENV_PATCH）——它在
-  // connection 模块 provide 时就改写句柄，早于 ui-settings 选择镜像模式；
-  // 这里兜底覆盖时序差异（若本插件 apply 晚于 ui-settings，则只能影响后续读者）。
+  // 兜底：确保 connection.isLoopback 为 true（issue #58）。
+  // 注：代理注入的 loopback 补丁（proxy.mjs LOOPBACK_ENV_PATCH）已在 #105 移除——
+  // 它与 DSH Desktop 2.0.4+ 客户端运行时不兼容，会令 BootHandoff 阶段白屏。
+  // #58「远程浏览器开设置页」需上游提供官方信任来源机制才能正经解决；此处仅保留兜底。
   if (ctx?.connection) {
     try {
       Object.defineProperty(ctx.connection, 'isLoopback', { value: true, writable: true, configurable: true });

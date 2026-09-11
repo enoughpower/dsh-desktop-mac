@@ -12,6 +12,7 @@ import {
   DEFAULT_PEAK_EFFECTIVE_AT,
   DEFAULT_PEAK_WINDOWS,
   DEFAULT_PRICE_TABLE,
+  DEFAULT_PRICE_TABLE_CNY,
   DEFAULT_PROVIDER_PRICE_TABLE,
   costOf,
   normalizePrice,
@@ -135,9 +136,13 @@ export function defaultConfig() {
     hideOfficialBalance: false, // 隐藏官方账户余额(issue #45):开启后侧边栏/会话页/设置页的官方余额 UI 整体不渲染
     hideTodayCost: false, // 隐藏今日消耗金额(issue #46):开启后侧栏今日费用行/预算明细今日行/概览今日卡片不渲染
     showTotalWithPlan: false, // 「含 Plan 总额」全局开关(v1.6.0):开启后全部金额展示按总等值(cost)计;默认按真金白银(apiCost)
+    sidebarSimple: false,
+    sidebarSimplePromptSeen: false,
+    sidebarStyle: 'standard', // 侧边栏进度条样式:standard(标准,纵向单列) | compact(紧凑,额度卡两列网格)
     legacyAutoImportedAt: 0, // 安装前历史自动导入标记(issue #27):完成时刻 ms;0 = 尚未跑过
     peakStyle: 'compact', // 峰谷时段条样式:compact(简洁单行/竖向同构) | classic(经典分段/胶囊芯片)
     priceMatch: 'auto', // 未知模型名自动匹配价格表:auto(去后缀/前缀/家族相似) | exact(仅精确)
+    priceMatchDismissed: [], // 从匹配设置中移除的 provider:model 行；不删除用量或改变计价规则。
     priceOverrides: {}, // 手动匹配覆盖:{ 'provider:modelId': 'provider:模型 | deepseek:__default__' };裸模型名 = 同渠道换名(旧版遗留,跨渠道裸 DeepSeek 名由查价兜底自愈,issue #56)
     priceTableDisplay: {}, // 费用设置直接显示(按模型):键 'provider:modelId' → 布尔;缺省 = DeepSeek 模型直接显示、第三方收入拓展价格表(含 DeepSeek 模型也可逐模型收入)
     prices: {
@@ -722,9 +727,12 @@ const VALIDATION_MESSAGES = {
     hideOfficialBalance: 'hideOfficialBalance 必须是布尔值',
     hideTodayCost: 'hideTodayCost 必须是布尔值',
     showTotalWithPlan: 'showTotalWithPlan 必须是布尔值',
+    sidebarSimple: '简化显示设置必须是布尔值',
+    sidebarStyle: 'sidebarStyle 必须是 standard / compact',
     peakStyle: 'peakStyle 必须是 compact / classic',
     priceMatch: 'priceMatch 必须是 auto / exact',
     priceOverrides: 'priceOverrides 必须是字符串→字符串映射',
+    priceMatchDismissed: 'priceMatchDismissed 必须是模型键字符串数组（最多 1000 项，每项 1–512 字符）',
     historyDays: 'historyDays 必须是 7-3650 的整数',
     locale: 'locale 必须是 auto / zh / en',
     budget: 'budget 非法',
@@ -744,6 +752,7 @@ const VALIDATION_MESSAGES = {
     balanceBudgetCap: 'balance.budgetCap 必须是非负数或 null',
     goQuota: 'goQuota 非法',
     customBalance: 'customBalance 非法',
+    customBalanceAdapter: 'customBalance.adapter 必须是 custom / aliyun',
     customBalanceEnabled: 'customBalance.enabled 必须是布尔值',
     customBalanceDisplay: 'customBalance.display 必须是 sidebar / settings / both / off',
     customBalanceRefresh: 'customBalance.refreshMinutes 必须是 1-1440 的整数',
@@ -817,9 +826,12 @@ const VALIDATION_MESSAGES = {
     hideOfficialBalance: 'hideOfficialBalance must be a boolean',
     hideTodayCost: 'hideTodayCost must be a boolean',
     showTotalWithPlan: 'showTotalWithPlan must be a boolean',
+    sidebarSimple: 'Simple display settings must be boolean',
+    sidebarStyle: 'sidebarStyle must be standard / compact',
     peakStyle: 'peakStyle must be compact / classic',
     priceMatch: 'priceMatch must be auto / exact',
     priceOverrides: 'priceOverrides must be a string→string map',
+    priceMatchDismissed: 'priceMatchDismissed must contain at most 1000 model keys of 1–512 characters',
     historyDays: 'historyDays must be an integer from 7 to 3650',
     locale: 'locale must be auto / zh / en',
     budget: 'Invalid budget',
@@ -839,6 +851,7 @@ const VALIDATION_MESSAGES = {
     balanceBudgetCap: 'balance.budgetCap must be a non-negative number or null',
     goQuota: 'Invalid goQuota',
     customBalance: 'Invalid customBalance',
+    customBalanceAdapter: 'customBalance.adapter must be custom / aliyun',
     customBalanceEnabled: 'customBalance.enabled must be a boolean',
     customBalanceDisplay: 'customBalance.display must be sidebar / settings / both / off',
     customBalanceRefresh: 'customBalance.refreshMinutes must be an integer from 1 to 1440',
@@ -988,9 +1001,20 @@ export function applyConfigPatch(current, rawPatch) {
   if (errors.length > 0) return { config: current, errors }
   // 结构化克隆,拒绝补丁时不得污染活配置(mergeDeep 共享未触及子树,校验期的就地收敛会泄漏进活配置)。
   const candidate = mergeDeep(structuredClone(current), patch)
+  // 这两张编辑表随对应设置整表提交；逐键深合并会把用户移除的键补回来。
+  if (Object.hasOwn(patch, 'priceOverrides')) candidate.priceOverrides = structuredClone(patch.priceOverrides)
+  const qwenPatch = patch.codingPlans?.qwen
+  if (qwenPatch !== null && typeof qwenPatch === 'object' && !Array.isArray(qwenPatch) && Object.hasOwn(qwenPatch, 'rates')) {
+    candidate.codingPlans.qwen.rates = structuredClone(qwenPatch.rates)
+  }
   // prices.models 是可编辑列表:客户端提交完整列表时必须按替换语义处理，
   // 否则 mergeDeep 会把已删除的旧模型重新合并回来。
   if (patch.prices !== null && typeof patch.prices === 'object' && !Array.isArray(patch.prices)) {
+    // 默认价卡片也是完整记录，清空某档位时不能被深合并复活。
+    const defaultPatch = patch.prices.default
+    if (defaultPatch && ['cacheHit', 'cacheMiss', 'output'].every(key => Object.hasOwn(defaultPatch, key))) {
+      candidate.prices.default = structuredClone(defaultPatch)
+    }
     if (patch.prices.models !== null && typeof patch.prices.models === 'object' && !Array.isArray(patch.prices.models)) {
       candidate.prices.models = patch.prices.models
     }
@@ -1090,9 +1114,19 @@ export function applyConfigPatch(current, rawPatch) {
   if (candidate.hideTodayCost !== undefined && typeof candidate.hideTodayCost !== 'boolean') errors.push(vmsg(locale, 'hideTodayCost'))
   // 「含 Plan 总额」全局开关(v1.6.0):布尔,可缺省(默认关)。
   if (candidate.showTotalWithPlan !== undefined && typeof candidate.showTotalWithPlan !== 'boolean') errors.push(vmsg(locale, 'showTotalWithPlan'))
+  // 侧边栏进度条样式:standard(默认,纵向单列) | compact(额度卡两列网格)。
+  for (const field of ['sidebarSimple', 'sidebarSimplePromptSeen']) {
+    if (candidate[field] !== undefined && typeof candidate[field] !== 'boolean') errors.push(vmsg(locale, 'sidebarSimple'))
+  }
+  if (candidate.sidebarStyle !== undefined && candidate.sidebarStyle !== 'standard' && candidate.sidebarStyle !== 'compact') errors.push(vmsg(locale, 'sidebarStyle'))
   if (candidate.peakStyle !== 'compact' && candidate.peakStyle !== 'classic') errors.push(vmsg(locale, 'peakStyle'))
   if (candidate.priceMatch !== 'auto' && candidate.priceMatch !== 'exact') errors.push(vmsg(locale, 'priceMatch'))
   const overrides = candidate.priceOverrides
+  if (candidate.priceMatchDismissed !== undefined && (!Array.isArray(candidate.priceMatchDismissed)
+    || candidate.priceMatchDismissed.length > 1000
+    || candidate.priceMatchDismissed.some(key => typeof key !== 'string' || key.length === 0 || key.length > 512))) {
+    errors.push(vmsg(locale, 'priceMatchDismissed'))
+  }
   if (overrides === null || typeof overrides !== 'object' || Array.isArray(overrides)
     || Object.entries(overrides).some(([k, v]) => typeof k !== 'string' || typeof v !== 'string')) {
     errors.push(vmsg(locale, 'priceOverrides'))
@@ -1158,6 +1192,7 @@ export function applyConfigPatch(current, rawPatch) {
       return
     }
     if (typeof entry.enabled !== 'boolean') errors.push(vmsg(locale, fieldPrefix + 'Enabled'))
+    if (entry.adapter !== undefined && !['custom', 'aliyun'].includes(entry.adapter)) errors.push(vmsg(locale, fieldPrefix + 'Adapter'))
     if (!['sidebar', 'settings', 'both', 'off'].includes(entry.display)) errors.push(vmsg(locale, fieldPrefix + 'Display'))
     const refreshMinutes = Number(entry.refreshMinutes)
     if (!Number.isInteger(refreshMinutes) || refreshMinutes < 1 || refreshMinutes > 1440) errors.push(vmsg(locale, fieldPrefix + 'Refresh'))
@@ -1357,7 +1392,23 @@ export function applyConfigPatch(current, rawPatch) {
 export function sanitizeConfig(raw) {
   const base = defaultConfig()
   const cfg = raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}
+  if (cfg.prices?.currency === 'CNY') {
+    base.prices = { ...base.prices, ...structuredClone(DEFAULT_PRICE_TABLE_CNY), currency: 'CNY' }
+  }
   const out = mergeDeep(base, cfg)
+  // 与 RPC 的完整列表替换语义一致：不能把新默认表的美元历史价混进旧人民币记录，
+  // 也不能在重启时复活用户已取消挂载的模型。升级由带标记的启动迁移完成。
+  const storedModels = cfg.prices?.models
+  if (storedModels && typeof storedModels === 'object' && !Array.isArray(storedModels)) {
+    out.prices.models = mergeDeep({}, storedModels)
+  }
+  // 新版默认价带峰谷档位；加载已有完整记录时保留用户省略/清空的档位。
+  // 旧官方默认价的补齐由带迁移标记的启动流程负责，避免每次加载覆盖自定义。
+  const storedDefault = cfg.prices?.default
+  if (storedDefault && typeof storedDefault === 'object' && !Array.isArray(storedDefault)) {
+    const { cacheHit, cacheMiss, output } = base.prices.default
+    out.prices.default = mergeDeep({ cacheHit, cacheMiss, output }, storedDefault)
+  }
   const isNum = v => typeof v === 'number' && Number.isFinite(v)
   const oneOf = (v, list, fallback) => (typeof v === 'string' && list.includes(v) ? v : fallback)
   // 顶层标量:类型不符回落默认。
@@ -1389,6 +1440,12 @@ export function sanitizeConfig(raw) {
   out.hideOfficialBalance = out.hideOfficialBalance === true
   out.hideTodayCost = out.hideTodayCost === true
   out.showTotalWithPlan = out.showTotalWithPlan === true
+  out.sidebarSimple = out.sidebarSimple === true
+  out.sidebarSimplePromptSeen = out.sidebarSimplePromptSeen === true
+  out.sidebarStyle = oneOf(out.sidebarStyle, ['standard', 'compact'], 'standard')
+  out.priceMatchDismissed = Array.isArray(out.priceMatchDismissed)
+    ? [...new Set(out.priceMatchDismissed.filter(key => typeof key === 'string' && key.length > 0 && key.length <= 512))].slice(0, 1000)
+    : []
   // v1.5.38 的隐私模式字段已废弃(改为 UI 隐藏开关):清洗旧账本残留,避免僵尸配置长期留存。
   delete out.hideAmounts
   // 峰/谷切换弹窗提醒:非法值定向收敛(开关默认开、提前量回 2、类型回 both)。
@@ -1452,6 +1509,7 @@ export function sanitizeConfig(raw) {
   const sanitizeCustomEntry = (raw, baseEntry) => {
     const entry = raw ?? {}
     const clean = {
+      ...(entry.adapter === 'aliyun' ? { adapter: 'aliyun' } : {}),
       enabled: entry.enabled === true,
       display: oneOf(entry.display, ['sidebar', 'settings', 'both', 'off'], 'both'),
       refreshMinutes: Math.min(1440, Math.max(1, Math.floor(Number(entry.refreshMinutes) || 15))),

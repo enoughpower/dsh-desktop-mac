@@ -60,7 +60,7 @@ desktop/
 ├── updater.patch.yml       # 注册内置版本号/检查更新插件
 ├── skills-hub.patch.yml   # 注册内置全局技能库插件 dsh-skills
 ├── mcp-settings.patch.yml  # 注册内置 MCP 服务管理插件
-├── vision.patch.yml        # 注册识图插件 dsh-vision-router v2.1.2（不接管 llm-deepseek）
+├── vision.patch.yml        # 注册识图插件 dsh-vision-router v2.1.5（不接管 llm-deepseek）
 ├── theme-blackgold.patch.yml # 注册黑金主题插件（@frostgao/dsh-theme-blackgold）
 ├── prune.sh                # node_modules 精简脚本
 ├── build.sh                # 一键构建
@@ -123,7 +123,7 @@ desktop/
 ## 版本号与检查更新
 
 应用在**窗口右上角**常驻显示当前 DeepSeek Harness 版本号（`@deepseek-ai/dsh` 包版本，
-如 `v0.1.1-rc.2`）。「设置 → 检查更新」里可以：
+如 `v0.1.5-rc.2`）。「设置 → 检查更新」里可以：
 
 - **检查更新**：对比 npm registry 上 `@deepseek-ai/dsh` 的最新版本；
 - **立即更新**：后台下载最新闭包（dsh 及其全部 `@deepseek-ai/*` 依赖，并自动补装新版本
@@ -148,7 +148,7 @@ desktop/
 
 ```bash
 cd desktop
-# 1) 把 package.json 里 @deepseek-ai/dsh 的版本号改成目标版本（如 0.1.1-rc.2）
+# 1) 把 package.json 里 @deepseek-ai/dsh 的版本号改成目标版本（如 0.1.5-rc.2）
 # 2) 用可用的 node/npm 重装依赖（系统 node 可能因 icu4c 损坏，用 nvm 的 node）
 $HOME/.nvm/versions/node/v22.19.0/bin/npm install --omit=dev --no-audit --no-fund
 # 3) 重建
@@ -211,7 +211,7 @@ $HOME/.nvm/versions/node/v22.19.0/bin/npm install --omit=dev --no-audit --no-fun
 ## 识图（dsh-vision-router）
 
 内置第三方插件 **dsh-vision-router**（见其
-[GitHub 仓库](https://github.com/ysr666/dsh-vision-router)，内置 **v2.1.2**），
+[GitHub 仓库](https://github.com/ysr666/dsh-vision-router)，内置 **v2.1.5**），
 给纯文本模型（DeepSeek 等）提供**像素保真的图片理解**：
 
 - **原图直看**：图片轮交给视觉模型看原图，DeepSeek 始终负责思考；图片轮就像普通
@@ -227,7 +227,7 @@ $HOME/.nvm/versions/node/v22.19.0/bin/npm install --omit=dev --no-audit --no-fun
 
 | 文件 | 作用 |
 |---|---|
-| `plugins/dsh-vision-router/` | 插件源码（v2.1.2：宿主路由 + 14 个视觉工具 + 浏览器半设置卡） |
+| `plugins/dsh-vision-router/` | 插件源码（v2.1.5：宿主路由 + 14 个视觉工具 + 浏览器半设置卡） |
 | `vision.patch.yml` | 注册该插件 + 附件准入放宽（20 MiB / 100 MP / 单边 10000 px）；不接管 llm-deepseek） |
 
 ## 全局技能库（dsh-skills）
@@ -305,7 +305,7 @@ Streamable HTTP），点「保存」即热更新生效（无需重启进程）�
 - 纯演示层覆盖（走 `dsh-client-ui-theme` 的 token 覆盖），尊重 `prefers-reduced-motion`。
 
 该插件是**客户端专属**（`immediately: true`，无需在设置里开开关），随插件清单在启动时
-自动加载生效。纯 ESM、无原生二进制，依赖的 `@deepseek-ai/dsh-client-ui-theme` 为 0.1.1-rc.2 自带。
+自动加载生效。纯 ESM、无原生二进制，依赖的 `@deepseek-ai/dsh-client-ui-theme` 为 0.1.5-rc.2 自带。
 
 | 文件 | 作用 |
 |---|---|
@@ -315,7 +315,7 @@ Streamable HTTP），点「保存」即热更新生效（无需重启进程）�
 ## 会话费用统计（dsh-cost-meter）
 
 内置 **dsh-cost-meter**（[Han-1413141/dsh-cost-meter](https://github.com/Han-1413141/dsh-cost-meter)，
-v1.7.10），提供会话级费用统计：
+v1.7.20），提供会话级费用统计：
 
 - **费用**：本会话成本、当日费用、历史记录；内置 90+ 模型价格目录自动匹配，与官方价格一键同步。
 - **余额 / 额度**：官方余额、可配自定义 Provider 余额（任意 HTTP 端点）与余额进度条；主流
@@ -332,7 +332,7 @@ v1.7.10），提供会话级费用统计：
 ## 手机访问（dsh-pocket）
 
 内置 **dsh-pocket**（[shaobeichen/dsh-pocket](https://github.com/shaobeichen/dsh-pocket)，
-v2.10.3，GPL-2.0），把 DSH「装进口袋」——**手机扫二维码实时同屏**电脑上的界面：
+v2.10.6，GPL-2.0），把 DSH「装进口袋」——**手机扫二维码实时同屏**电脑上的界面：
 
 - **局域网扫码**：设置 → **手机访问**，同一 WiFi 下手机扫码即开（自动识别本机局域网 IP；
   独立 8 位数字密码，默认开启，可一键关闭或自定义）。

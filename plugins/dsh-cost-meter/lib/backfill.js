@@ -893,9 +893,10 @@ export async function importLegacyHistory(ledger, sessionsRoot) {
  *    splitLedgerApiCost 重写(与 plan/api 分类口径对齐)。
  * @param ledger - 已打开的账本(config 已是目标币种价格表)。
  * @param sessionsRoot - 宿主会话根目录($DSH_HOME/sessions)。
+ * @param includeBucket - 可选的 (providerModelKey, date) 过滤器，仅修复目标价格路径。
  * @returns {{ scanned, recostedSessions, skippedSessions, recostedDays }}。
  */
-export async function recomputeLedgerPricingBasis(ledger, sessionsRoot) {
+export async function recomputeLedgerPricingBasis(ledger, sessionsRoot, includeBucket) {
   const result = { scanned: 0, recostedSessions: 0, skippedSessions: 0, recostedDays: 0 }
   const bySession = new Map()
   for (const path of listSessionLogs(sessionsRoot)) {
@@ -912,7 +913,7 @@ export async function recomputeLedgerPricingBasis(ledger, sessionsRoot) {
       bySession.set(replayed.sessionId, replayed.days)
       continue
     }
-    mergeDayMaps(existing.days, replayed.days)
+    mergeDayMaps(existing, replayed.days)
   }
   const touchedDates = new Set()
   const tokenFields = ['input', 'output', 'cacheRead', 'cacheWrite', 'reasoning', 'calls']
@@ -926,7 +927,7 @@ export async function recomputeLedgerPricingBasis(ledger, sessionsRoot) {
       const dayPm = day.byProviderModel !== null && typeof day.byProviderModel === 'object' ? day.byProviderModel : {}
       // 前置校验(全部通过才动账):键集合一致、逐键 token/calls 相等、日期聚合
       // 含全部键。任何一条不满足都保持旧口径,杜绝半改状态。
-      let replaceable = newKeys.length > 0
+      let replaceable = newKeys.length > 0 && newKeys.length === Object.keys(oldPm).length
       for (const key of newKeys) {
         const oldBucket = oldPm[key]
         const dayBucket = dayPm[key]
@@ -941,18 +942,21 @@ export async function recomputeLedgerPricingBasis(ledger, sessionsRoot) {
         result.skippedSessions += 1
         continue
       }
-      const totals = sumDayMap(pm)
-      const oldCost = Number(row.cost) || 0
-      const oldApi = Number(row.apiCost) || 0
-      row.byProviderModel = cloneDayMap(pm)
-      row.cost = totals.cost
-      row.apiCost = totals.apiCost
-      day.cost = (Number(day.cost) || 0) - oldCost + totals.cost
-      day.apiCost = (Number(day.apiCost) || 0) - oldApi + totals.apiCost
-      for (const key of newKeys) {
+      const selected = includeBucket ? newKeys.filter(key => includeBucket(key, date)) : newKeys
+      if (selected.length === 0) continue
+      // 只替换已验证的桶并逐差额调整容器；保留未选中模型和无明细残差。
+      row.byProviderModel = cloneDayMap(oldPm)
+      for (const key of selected) {
+        const costDelta = (Number(pm[key].cost) || 0) - (Number(oldPm[key].cost) || 0)
+        const apiDelta = (Number(pm[key].apiCost) || 0) - (Number(oldPm[key].apiCost) || 0)
+        row.byProviderModel[key] = { ...pm[key] }
+        row.cost = (Number(row.cost) || 0) + costDelta
+        row.apiCost = (Number(row.apiCost) || 0) + apiDelta
+        day.cost = (Number(day.cost) || 0) + costDelta
+        day.apiCost = (Number(day.apiCost) || 0) + apiDelta
         const dayBucket = dayPm[key]
-        dayBucket.cost = (Number(dayBucket.cost) || 0) - (Number(oldPm[key].cost) || 0) + (Number(pm[key].cost) || 0)
-        dayBucket.apiCost = (Number(dayBucket.apiCost) || 0) - (Number(oldPm[key].apiCost) || 0) + (Number(pm[key].apiCost) || 0)
+        dayBucket.cost = (Number(dayBucket.cost) || 0) + costDelta
+        dayBucket.apiCost = (Number(dayBucket.apiCost) || 0) + apiDelta
       }
       result.recostedSessions += 1
       touchedDates.add(date)
