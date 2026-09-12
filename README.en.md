@@ -57,7 +57,6 @@ desktop/
 ├── plugins.mjs             # user-level plugin CLI: add/remove/list (Plan C)
 ├── add-plugin.sh           # one-click bundled plugin install / --runtime user-level install
 ├── prune.patch.yml         # disables pruned plugin rows (llm-pi-ai, telemetry)
-├── git.patch.yml           # registers the built-in Git plugin
 ├── billing.patch.yml       # registers the cost plugin dsh-cost-meter
 ├── pocket.patch.yml        # registers the phone-access plugin dsh-pocket
 ├── updater.patch.yml       # registers the version/update-check plugin
@@ -136,7 +135,7 @@ package version, e.g. `v0.1.5-rc.2`). Under **Settings → Check for Updates**:
   third-party deps missing from the bundle) and atomically replaces the bundle's `node_modules`,
   then restarts the app (re-signed to keep the arm64 ad-hoc signature valid).
 
-This is a built-in plugin (same pattern as git):
+This is a built-in plugin (same pattern as cost-meter):
 
 | File | Role |
 |---|---|
@@ -163,61 +162,6 @@ $HOME/.nvm/versions/node/v22.19.0/bin/npm install --omit=dev --no-audit --no-fun
 
 The `@deepseek-ai/dsh` version in the produced app = the version in `desktop/node_modules`, i.e. what
 `package.json` declares.
-
-## Git Source Management
-
-The built-in Git plugin provides a **full-screen Git panel**: open it via the **"Git" tab** in the
-conversation (trajectory) view's tab bar (replaces the chat/trajectory area), and quit with Esc / the
-close button. On open it **auto-binds to the current session's working directory** (`useSessions` reads
-the current session cwd); the top bar has a "Refresh" button.
-
-Features:
-
-- **Status sections**: staged / unstaged / untracked files in columns; **checkbox = stage toggle** —
-  check an unstaged file to stage it, uncheck a staged one to unstage; the "Unstaged" header has a
-  select-all checkbox for stage/unstage-all.
-- **Discard changes**: each row's `⋯` menu → "Discard" restores worktree changes (not for untracked);
-  "Remove file" deletes it from the worktree (incl. untracked, with confirmation, irreversible).
-- **Commit** (the git-commit button): **commits only staged (checked) files**; staged-only, unstaged
-  untouched; supports amending the last commit; **message input is multi-line** (Enter newline,
-  auto-grows, ⌘/Ctrl+Enter or the Commit button), with output echo below.
-- **Branch switching**: the top branch button opens a menu grouped by **Local / Remote** listing every
-  branch; **click a row to switch** (a remote branch auto-creates a same-named local tracking branch;
-  if the local name already exists it falls back to switching local); the current branch is highlighted
-  with a dot and not clickable. The menu is a narrow vertical list with borderless rows; per-row rename ✎
-  and delete ✕ (confirmed) remain. "New" (branch from the selected commit) and "Merge" (merge the selected
-  commit into current) live in the **commit-detail toolbar**, styled like "Refresh".
-- **Remote ops**: push (-u sets upstream), pull (--ff-only), Fetch --prune.
-- **History**: a Git-Graph-style commit graph (mainline left, branches fork right and run down, each
-  branch colored per column; HEAD is a hollow circle, others solid), click a commit for the full diff;
-  supports per-file history (`git log -- <file>`) and blame.
-- **File diff**: click a file for "worktree vs HEAD" comparison (with file history).
-- **Layout**: commit history occupies the top of the second column (fills remaining height); the commit
-  form is at the bottom.
-- **Diff view**: diffs grouped by file (file header + add/delete/rename/binary badges); changed lines
-  marked green/red; old/new line numbers per row; hunk headers show `@@ -old +new @@`.
-- **Files browser**: a **"Files"** tab sits to the right of "Git" in the tab bar — the full workspace
-  file tree on the left (with **expand-all / collapse-all** buttons), file content on the right. Text
-  editing is powered by **CodeMirror 6** (VS Code-grade **syntax highlighting** & editing: line numbers,
-  code folding, bracket matching, multi-cursor, undo/redo…; JS/TS/JSX/TSX/JSON/HTML/CSS/Python/Markdown/
-  YAML/Shell/C/C++/Java/Kotlin/Go…); ⌘/Ctrl+S saves, ⌘/Ctrl+E toggles edit/preview; images and common
-  formats preview inline. The editor uses the **One Dark** theme to match the black-gold dark theme.
-  **.md/.markdown** files render as Markdown in preview mode (GFM, line breaks, tables/quotes/code blocks);
-  edit mode shows the source.
-  > No freeze on huge change-sets: git itself answers in milliseconds for thousands of files — the
-  > freeze came from the client rendering *every* file as a full DOM row. Each status section now
-  > renders only the first 600 rows and the Files tree caps at 1200 items, folding the rest behind a
-  > "…N more (click to expand all)" row, so huge workspaces stay responsive.
-
-| File | Role |
-|---|---|
-| `plugins/dsh-git/` | Host half: `/git` JSON API (28 ops: status/stage/diff/commit/branch/merge/log/blame/cat…) + `/fs` file API (tree/read/write) |
-| `plugins/dsh-client-ui-git/` | Browser half: Git tab + Files browser tab + full-screen panel UI |
-| `git.patch.yml` | registers these two plugins (via `--patch`) |
-
-**Panel preview:**
-
-![Git panel: branch bar + commit history + changed files + diff view](./docs/screenshots/git-panel.png)
 
 ## Vision (dsh-vision-router)
 
@@ -297,7 +241,7 @@ via `DSH_HOME`). This mechanism is built into the app:
 > `--runtime add` passes `-w` (the profile is a pnpm workspace root; pnpm needs it).
 > `remove`/`list` use the full package name (e.g. `@scope/name`); trust `list` output.
 >
-> **Both plugin kinds work**: bundle plugins (e.g. git/updater) auto-join the bundle layer after install;
+> **Both plugin kinds work**: bundle plugins (e.g. updater, setting-mcp) auto-join the bundle layer after install;
 > browser-only plugins that only declare `dsh.client` (e.g. `@frostgao` themes) are NOT auto-activated by
 > `dsh plugin add` — `plugins.mjs` appends an activation row to the profile's user-layer
 > `cordis.patch.yml` and cleans it on remove.
@@ -359,9 +303,7 @@ same interface in real time**:
 - **Desktop adaptation**: the desktop app injects `dsh-desktop-mode=compatibility`, so the
   QR mirror works out of the box; the plugin's in-page "update / restart" actions are disabled
   in the desktop build (managed by the app). If port 3081 is taken the proxy auto-switches.
-- **Trimmed tabs on phone**: the "Git" and "文件" (Files) tabs are hidden when accessed from a
-  phone (the Git client skips registering them when the URL carries dsh-desktop-mode), so they
-  don't collide with the mobile drawer layout; the desktop app is unaffected.
+
 
 | File | Role |
 |---|---|

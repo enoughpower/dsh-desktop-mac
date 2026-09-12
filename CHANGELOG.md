@@ -101,5 +101,9 @@
   - dsh-skills 0.1.1 与 @opendsh/dsh-plugin-setting-mcp 0.1.2 已是最新版本；
     @frostgao/dsh-theme-blackgold 未发布到 npm，保持 1.0.0。
 - README（中/英）同步核心与插件版本号。
+- **移除内置 Git/文件插件**（应用版本 1.0.2 → 1.0.3）：删除本地插件 `plugins/dsh-git`
+  （宿主 `/git`、`/fs` API）与 `plugins/dsh-client-ui-git`（对话视图的「Git」「文件」两个
+  页签及其面板），并移除注册补丁 `git.patch.yml`、构建拷贝行与 README 对应章节；
+  应用不再内置 Git 面板与文件浏览页签。
 
 

@@ -41,8 +41,8 @@ linkBundledPlugins(HERE, process.env.DSH_HOME);
  * Discover the overlay patches to apply. Any *.patch.yml dropped into the
  * backend directory is auto-registered -- no launcher change needed to add a
  * plugin (see add-plugin.sh). Each patch is a Cordis patch file that inserts
- * the plugin's host/browser halves (e.g. git.patch.yml inserts dsh-git +
- * dsh-client-ui-git). prune.patch.yml is just another patch and is picked up
+ * the plugin's host/browser halves (e.g. billing.patch.yml inserts
+ * dsh-cost-meter). prune.patch.yml is just another patch and is picked up
  * the same way. Sorted by filename so ordering is deterministic.
  */
 import { existsSync, readdirSync } from "node:fs";

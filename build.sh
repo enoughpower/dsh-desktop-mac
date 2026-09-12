@@ -176,7 +176,6 @@ PATCH
 else
   cp "$ROOT/prune.patch.yml" "$BACKEND/prune.patch.yml"
 fi
-cp "$ROOT/git.patch.yml" "$BACKEND/git.patch.yml"
 cp "$ROOT/billing.patch.yml" "$BACKEND/billing.patch.yml"
 cp "$ROOT/updater.patch.yml" "$BACKEND/updater.patch.yml"
 cp "$ROOT/skills-hub.patch.yml" "$BACKEND/skills-hub.patch.yml"

@@ -43,8 +43,6 @@ const LOCAL_PLUGINS = new Set([
   "dsh-client-ui-updater",
   "dsh-billing",
   "dsh-client-ui-billing",
-  "dsh-git",
-  "dsh-client-ui-git",
 ]);
 
 function ok(value) {

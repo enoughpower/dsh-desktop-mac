@@ -54,7 +54,6 @@ desktop/
 ├── plugins.mjs             # 用户级插件 CLI：add/remove/list（方案 C）
 ├── add-plugin.sh           # 一键装内置插件 / --runtime 走用户级安装
 ├── prune.patch.yml         # 禁用被裁剪掉的插件行（llm-pi-ai、telemetry）
-├── git.patch.yml           # 注册内置 Git 插件
 ├── billing.patch.yml       # 注册内置费用插件 dsh-cost-meter
 ├── pocket.patch.yml        # 注册内置手机访问插件 dsh-pocket
 ├── updater.patch.yml       # 注册内置版本号/检查更新插件
@@ -130,7 +129,7 @@ desktop/
   引入、应用包内缺失的第三方依赖）并原子替换进应用包内的 `node_modules`，完成后自动
   重启应用（重启前会重新签名，保证 arm64 上的 ad-hoc 签名仍然有效）。
 
-实现是内置插件（与 git 同模式）：
+实现是内置插件（与 cost-meter 等内置插件同模式）：
 
 | 文件 | 作用 |
 |---|---|
@@ -157,56 +156,6 @@ $HOME/.nvm/versions/node/v22.19.0/bin/npm install --omit=dev --no-audit --no-fun
 
 `./build.sh` 产出应用包的 `@deepseek-ai/dsh` 版本 = `desktop/node_modules` 里的版本，
 所以以 `package.json` 声明的版本为准。
-
-## Git 源码管理
-
-内置的 Git 插件提供**全屏 Git 面板**：入口是**对话（轨迹）视图右侧页签栏的「Git」页签**
-（点击后用面板替换聊天/轨迹区域），Esc / 关闭按钮退出。
-打开时**自动关联当前会话的工作目录**（`useSessions` 读取当前会话 cwd）；
-顶部栏有「刷新」按钮。
-
-功能：
-
-- **状态分区**：暂存区 / 未暂存区 / 未跟踪文件分栏列出；**checkbox 即暂存开关**——
-  勾选未暂存文件即暂存，取消已暂存文件的勾选即取消暂存；「未暂存」标题旁有全选框，
-  一键全部暂存 / 全部取消暂存。
-- **丢弃改动**：每行右侧 `⋯` 菜单 →「丢弃改动」恢复工作区改动（未跟踪文件不提供）；
-  「移除文件」从工作区删除该文件（含未跟踪文件，二次确认后不可恢复）。
-- **提交**：**只提交已暂存（勾选）的文件**（`提交已暂存 (N)`），未暂存的不受影响；
-  支持 amend 上次提交；**提交说明为多行输入**（Enter 换行、随内容自动增高，⌘/Ctrl+Enter
-  或「提交」按钮提交），下方输出回显。
-- **分支切换**：顶部分支按钮弹出分支菜单，按「本地 / 远程」分组**列出全部本地与远程
-  分支，点击整行即切换**（远程分支点选后自动创建同名本地跟踪分支，本地同名存在时回退切
-  本地）；当前分支高亮带圆点、不可点。菜单为纵向窄列表、行无边框；行内保留重命名 ✎ /
-  删除 ✕（二次确认）。「新建」（从选中提交建分支）与「合并」（合并选中提交到当前分支）
-  在**提交详情工具栏**，样式与「刷新」一致。
-- **远程操作**：推送（-u 设上游）、拉取（--ff-only）、Fetch --prune。
-- **历史**：图形化提交图（Git Graph 风格：主线靠左、分支向右分叉后竖直向下，
-  每条分支按列着色；HEAD 为空心圆，其余为实心圆点），点击提交看完整 diff；支持
-  文件级历史（`git log -- <file>`）与 blame。
-- **文件对比**：点击文件查看「工作区 vs HEAD」内容对照（含文件历史）。
-- **面板布局**：第 2 列上方为提交历史（占满剩余高度），最下方为提交表单。
-- **差异视图**：diff 按文件分类展示（文件头 + 新增/删除/重命名/二进制徽标），修改位置
-  用绿色/红色色块标出，每行标注新旧行号，hunk 头显示 `@@ -旧行 +新行 @@`。
-- **文件浏览**：页签栏「Git」右侧新增 **「文件」** 页签——左侧为该工作空间的完整文件树
-  （支持**一键全部展开/收起**），右侧显示文件内容；文本编辑基于 **CodeMirror 6**（VS Code 级
-  **语法高亮**与编辑：行号、代码折叠、括号匹配、多光标、undo/redo…支持 JS/TS/JSX/TSX/JSON/
-  HTML/CSS/Python/Markdown/YAML/Shell/C/C++/Java/Kotlin/Go 等），⌘/Ctrl+S 保存、⌘/Ctrl+E
-  切换编辑/预览；图片等常见格式直接预览。编辑器采用 **One Dark** 主题，适配黑金深色。
-  **.md/.markdown** 预览模式自动渲染为 Markdown（GFM、断行、表格/引用/代码块），编辑模式显示源码。
-  > 文件/变更太多不致卡死：git 本身对数千文件毫秒级返回，卡死源于**客户端全量渲染**（每个
-  > 文件一个含 checkbox/菜单的 DOM 行）。现按区块只渲染前 600 行、「文件」树截断到 1200 项，
-  > 超出折叠成「还有 N 个（点击展开全部）」，超大工作区也不卡界面。
-
-| 文件 | 作用 |
-|---|---|
-| `plugins/dsh-git/` | 宿主半部：`/git` JSON API（status/stage/diff/commit/branch/merge/log/blame/cat 等 28 个操作）+ `/fs` 文件 API（tree/read/write） |
-| `plugins/dsh-client-ui-git/` | 浏览器半部：Git 页签 + 文件浏览页签 + 全屏面板 UI |
-| `git.patch.yml` | 注册这两个插件（launcher 经 `--patch` 传入） |
-
-**面板效果：**
-
-![Git 面板：分支栏 + 提交历史 + 变更文件 + 差异视图](./docs/screenshots/git-panel.png)
 
 ## 识图（dsh-vision-router）
 
@@ -289,7 +238,7 @@ Streamable HTTP），点「保存」即热更新生效（无需重启进程）�
 > `--runtime add` 会传 `-w`（profile 是 pnpm workspace 根，pnpm 需要该标志）。
 > `remove`/`list` 用包全名（如 `@scope/name`），以 `list` 输出为准。
 >
-> **两类插件都支持**：声明 `dsh.bundle` 的插件（如 git/updater）装完自动加入 bundle 层；
+> **两类插件都支持**：声明 `dsh.bundle` 的插件（如 updater、setting-mcp）装完自动加入 bundle 层；
 > 只声明 `dsh.client` 的纯前端插件（如 `@frostgao` 的主题插件）`dsh plugin add` 不会自动激活，
 > `plugins.mjs` 会在 profile 的用户层 `cordis.patch.yml` 里自动补一条激活 row，移除时一并清理。
 
@@ -343,8 +292,7 @@ v2.10.6，GPL-2.0），把 DSH「装进口袋」——**手机扫二维码实时
 - **桌面版适配**：桌面端自动注入 dsh-desktop-mode=compatibility，扫码同屏正常可用；
   插件内「更新 / 重启」两项在桌面版自动停用（由应用统一管理）。端口冲突（3081 被占）时
   代理自动换端口，无需干预。
-- **手机端精简页签**：手机访问时自动隐藏「Git」「文件」两个页签（URL 带 dsh-desktop-mode
-  参数时 Git 客户端跳过注册），避免与移动端抽屉布局叠加；桌面端不受影响。
+
 
 | 文件 | 作用 |
 |---|---|
