@@ -1,7 +1,7 @@
 /**
  * dsh-cost-meter 的 Host 面 Typert 清单(由 typert-loader 自动扫描注册)。
  * 手写清单,结构与 @deepseek-ai/dsh-typert-generator 产物一致:
- * `./typert` 导出 TYPERT,invocations 的 codec 必须是 zod v4 实例。
+ * `./typert` 导出 TYPERT;strict codec 同时提供旧宿主的 schema 和新宿主的 create()。
  */
 
 import { z } from 'zod'
@@ -38,6 +38,14 @@ const daySchema = z.object({
   sessions: z.array(sessionSchema),
 })
 
+const externalSummarySchema = z.object({ today: daySchema, month: daySchema, total: daySchema, history: z.array(daySchema) })
+const externalUsageSchema = z.object({
+  fetchedAt: num,
+  stale: z.boolean(),
+  sources: z.array(externalSummarySchema.extend({ source: z.string() })),
+  combined: externalSummarySchema,
+})
+
 // 带所属日期的会话条目(issue #22 按会话排行:不分日期视角)。
 const datedSessionSchema = sessionSchema.extend({ date: z.string() })
 
@@ -45,9 +53,26 @@ const topSessionsSchema = z.object({
   sessions: z.array(datedSessionSchema),
 })
 
+export const sessionCostSchema = z.object({
+  own: sessionSchema,
+  subagents: sessionSchema,
+  subagentCount: num,
+  found: z.boolean(),
+})
+
+const longContextSchema = z.object({
+  aboveInputTokens: z.number().positive(),
+  cacheHit: z.number().nonnegative(),
+  cacheMiss: z.number().nonnegative(),
+  cacheWrite: z.number().nonnegative().optional(),
+  output: z.number().nonnegative(),
+  reasoning: z.number().nonnegative().optional(),
+})
+
 const priceTierSchema = z.object({
   cacheHit: num,
   cacheMiss: num,
+  cacheWrite: z.number().nonnegative().optional(),
   output: num,
   reasoning: num.optional(),
 })
@@ -62,7 +87,9 @@ const providerPriceSchema = z.object({
   input: num.optional(),
   cachedInput: num.optional(),
   cacheRead: num.optional(),
-  cacheWrite: num.optional(),
+  cacheWrite: z.number().nonnegative().optional(),
+  cny: priceTierSchema.optional(),
+  longContext: longContextSchema.optional(),
   cacheCreation5m: num.optional(),
   cacheCreation1h: num.optional(),
   output: num.optional(),
@@ -88,6 +115,8 @@ const catalogEntrySchema = providerPriceSchema.extend({
 const priceSchema = z.object({
   cacheHit: num,
   cacheMiss: num,
+  cacheWrite: z.number().nonnegative().optional(),
+  longContext: longContextSchema.optional(),
   output: num,
   reasoning: num.optional(),
   billingMode: z.enum(['flat', 'deepseek-peak', 'batch']).optional(),
@@ -114,6 +143,7 @@ const configSchema = z.object({
   peakEnabled: z.boolean(),
   peakEffectiveAt: z.string(),
   peakWindows: z.array(z.object({ start: num, end: num })),
+  peakHolidays: z.array(z.string()),
   peakNotice: z.boolean().optional(),
   // 峰/谷切换前弹窗提醒:开关(默认开)/提前分钟数(1-30)/类型(峰|谷|两者)。
   peakAlertEnabled: z.boolean().optional(),
@@ -125,10 +155,14 @@ const configSchema = z.object({
   // UI 隐藏开关(issues #45/#46):开启后官方余额/今日消耗金额的对应 UI 区块整体不渲染。
   hideOfficialBalance: z.boolean().optional(),
   hideTodayCost: z.boolean().optional(),
+  sidebarTodayMetric: z.enum(['cost', 'tokens']).optional(),
   // 「含 Plan 总额」全局开关(v1.6.0):开启后全部金额展示按总等值(cost)计。
   showTotalWithPlan: z.boolean().optional(),
+  includeSubagentCost: z.boolean().optional(),
+  codexQuotaEnabled: z.boolean().optional(),
   sidebarSimple: z.boolean().optional(),
   sidebarSimplePromptSeen: z.boolean().optional(),
+  sidebarModels: z.object({ enabled: z.boolean(), period: z.enum(['today', 'history']), topN: z.number().int().min(1).max(10), summary: z.enum(['total', 'top']), position: z.enum(['first', 'afterBalance', 'last']), defaultOpen: z.boolean(), remember: z.boolean(), tokens: z.boolean(), shares: z.boolean(), refreshSeconds: z.number().int().min(10).max(60), dock: z.boolean() }).strict().optional(),
   sidebarStyle: z.enum(['standard', 'compact']).optional(),
   priceMatchDismissed: z.array(z.string()).optional(),
   // 安装前历史自动导入完成时刻(issue #27,内部标记;0/缺席 = 尚未跑过)。
@@ -157,9 +191,11 @@ const configSchema = z.object({
     display: z.enum(['sidebar', 'settings', 'both', 'off']).optional(),
     refreshMinutes: num.optional(),
     apiKey: z.string().optional(),
+    baseUrl: z.string().optional(),
     // SCNet 本地计量专用(issue #26):月度 Credits 额度与订阅起始日;其余厂商无此二键。
     planCredits: num.optional(),
     planStart: z.string().optional(),
+    quotaSource: z.enum(['local', 'cli', 'bailian']).optional(),
     // 千问 Token Plan 抵扣率覆盖(issue #78):归一模型名 → 三费率;仅千问有此键。
     rates: z.record(z.string(), z.object({
       input: num,
@@ -201,7 +237,8 @@ const configSchema = z.object({
     label: z.string(),
     labelEn: z.string().optional(),
     display: z.enum(['sidebar', 'settings', 'both', 'off']),
-    unit: z.enum(['USD', 'CNY', 'EUR']).optional(),
+    unit: z.enum(['USD', 'CNY', 'EUR', 'CREDITS']).optional(),
+    convertToDisplayCurrency: z.boolean().optional(),
     refreshMinutes: num,
     request: z.object({
       url: z.string(),
@@ -220,7 +257,8 @@ const configSchema = z.object({
     label: z.string(),
     labelEn: z.string().optional(),
     display: z.enum(['sidebar', 'settings', 'both', 'off']),
-    unit: z.enum(['USD', 'CNY', 'EUR']).optional(),
+    unit: z.enum(['USD', 'CNY', 'EUR', 'CREDITS']).optional(),
+    convertToDisplayCurrency: z.boolean().optional(),
     refreshMinutes: num,
     request: z.object({
       url: z.string(),
@@ -243,6 +281,8 @@ const configSchema = z.object({
       includeProviders: z.array(z.string()),
       allowedHosts: z.array(z.string()),
       allowInsecureHttp: z.boolean(),
+      // 只显示 Antigravity 的 Gemini 原生组(过滤 Claude/GPT 第三方模型池);缺省不开启。
+      antigravityOnlyGemini: z.boolean().optional(),
       // 派生凭据变量名(issue #87):客户端据此定位 write-only 目标,非敏感。
       keyVar: z.string().optional(),
     })),
@@ -360,16 +400,18 @@ const codingPlanSchema = z.object({
   refreshMinutes: num,
   // v1.6.8 起恒为空串(密钥已改由 DSH 凭据库托管):仅保留字段以兼容旧客户端。
   apiKey: z.string(),
+  baseUrl: z.string().optional(),
   // 密钥配置状态(v1.6.8):是否已在凭据库中配置,以及来自哪一层(env / file / legacy)。
   keyConfigured: z.boolean().optional(),
   keySource: z.string().optional(),
   status: z.enum(['off', 'ok', 'error']),
   message: z.string(),
   fetchedAt: num,
-  windows: z.record(z.string(), z.object({ percent: num.optional(), resetsAt: z.string(), text: z.string().optional() })),
+  windows: z.record(z.string(), z.object({ percent: num.optional(), resetsAt: z.string(), text: z.string().optional(), unlimited: z.boolean().optional() })),
   // 本地计量配置透传(仅 scnet / qwen 有;settings 页编辑入口需要看到当前值)。
   planCredits: num.optional(),
   planStart: z.string().optional(),
+  quotaSource: z.enum(['local', 'cli', 'bailian']).optional(),
   rates: z.record(z.string(), z.object({
     input: num,
     cachedInput: num,
@@ -438,6 +480,7 @@ export const stateSchema = z.object({
   // Token Plan 统计(issue #64);缺席 = 旧快照/降级路径。
   planStats: planStatsSchema.optional(),
   history: z.array(daySchema),
+  externalUsage: externalUsageSchema.optional(),
   config: configSchema,
   priceCatalog: z.record(z.string(), z.record(z.string(), z.record(z.string(), catalogEntrySchema))).optional(),
   // 存量密钥迁移提示(v1.6.8):仅在有密钥未能自动导入凭据库时出现,值为环境变量名。
@@ -460,21 +503,24 @@ const fetchPricesSchema = z.object({
   state: stateSchema.optional(),
 })
 
-const _state$codec = { mode: 'strict', typeSymbol: 'dsh-cost-meter#CostState', schema: stateSchema }
-const _patch$codec = { mode: 'strict', typeSymbol: 'dsh-cost-meter#ConfigPatch', schema: patchSchema }
-const _fetch$codec = { mode: 'strict', typeSymbol: 'dsh-cost-meter#FetchPricesResult', schema: fetchPricesSchema }
-const _provider$codec = { mode: 'strict', typeSymbol: 'dsh-cost-meter#CodingPlanProvider', schema: z.string() }
-const _gatewaySourceId$codec = { mode: 'strict', typeSymbol: 'dsh-cost-meter#GatewayQuotaSourceId', schema: z.string().optional() }
+const strictCodec = (name, schema) => ({ mode: 'strict', typeSymbol: 'dsh-cost-meter#' + name, schema, create: () => schema })
+const _state$codec = strictCodec('CostState', stateSchema)
+const _patch$codec = strictCodec('ConfigPatch', patchSchema)
+const _fetch$codec = strictCodec('FetchPricesResult', fetchPricesSchema)
+const _provider$codec = strictCodec('CodingPlanProvider', z.string())
+const _gatewaySourceId$codec = strictCodec('GatewayQuotaSourceId', z.string().optional())
 // 密钥目标(v1.6.8):'goQuota' | 'codingPlans.<id>' | 'codingPlans.volcengine.ak' | '...sk'
-const _credTarget$codec = { mode: 'strict', typeSymbol: 'dsh-cost-meter#CredentialTarget', schema: z.string() }
+const _credTarget$codec = strictCodec('CredentialTarget', z.string())
 // 密钥明文(v1.6.8):仅经 setCredential 单向写入凭据库,永不回传前端。
-const _credValue$codec = { mode: 'strict', typeSymbol: 'dsh-cost-meter#CredentialValue', schema: z.string() }
-const _day$codec = { mode: 'strict', typeSymbol: 'dsh-cost-meter#DayRecord', schema: daySchema }
-const _date$codec = { mode: 'strict', typeSymbol: 'dsh-cost-meter#DayKey', schema: z.string() }
-const _topSessions$codec = { mode: 'strict', typeSymbol: 'dsh-cost-meter#TopSessions', schema: topSessionsSchema }
-const _limit$codec = { mode: 'strict', typeSymbol: 'dsh-cost-meter#SessionLimit', schema: num }
-const _sort$codec = { mode: 'strict', typeSymbol: 'dsh-cost-meter#SessionSort', schema: z.string() }
-const _dir$codec = { mode: 'strict', typeSymbol: 'dsh-cost-meter#SessionSortDir', schema: z.string() }
+const _credValue$codec = strictCodec('CredentialValue', z.string())
+const _day$codec = strictCodec('DayRecord', daySchema)
+const _date$codec = strictCodec('DayKey', z.string())
+const _topSessions$codec = strictCodec('TopSessions', topSessionsSchema)
+const _limit$codec = strictCodec('SessionLimit', num)
+const _sort$codec = strictCodec('SessionSort', z.string())
+const _dir$codec = strictCodec('SessionSortDir', z.string())
+const _sessionId$codec = strictCodec('SessionId', z.string().min(1).max(512))
+const _sessionCost$codec = strictCodec('SessionCost', sessionCostSchema)
 
 export const TYPERT = {
   package: 'dsh-cost-meter',
@@ -543,7 +589,7 @@ export const TYPERT = {
       parameters: [
         {
           name: 'index', wire: 'index', source: 'json', acceptsUndefined: true,
-          codec: { mode: 'strict', typeSymbol: 'dsh-cost-meter#CustomBalanceIndex', schema: z.number().int().min(0).max(7).optional() },
+          codec: strictCodec('CustomBalanceIndex', z.number().int().min(0).max(7).optional()),
         },
       ],
       result: _fetch$codec,
@@ -615,6 +661,15 @@ export const TYPERT = {
         { name: 'dir', wire: 'dir', source: 'json', codec: _dir$codec, acceptsUndefined: true },
       ],
       result: _topSessions$codec,
+    },
+    {
+      id: 'dsh-cost-meter#costMeter/getSessionCost',
+      service: 'costMeter',
+      namespace: 'costMeter',
+      method: 'getSessionCost',
+      invocation: { kind: 'direct' },
+      parameters: [{ name: 'sessionId', wire: 'sessionId', source: 'json', codec: _sessionId$codec }],
+      result: _sessionCost$codec,
     },
     {
       // 写入一枚密钥到 DSH 凭据库(v1.6.8):密钥不再经 updateConfig 传递,值只进凭据库。
@@ -728,6 +783,13 @@ export const TYPERT = {
             signature: 'getTopSessions(limit: number, sort?: string, dir?: string): TopSessions',
             summary: '跨全部日期按指定排序返回前 N 个会话(不分日期视角)。Return the top N sessions across all days with the given sort.',
             jsDoc: '/**\n * 跨全部日期返回前 N 个会话(每条带所属日期/标题/创建时刻)。\n * @param limit - 返回条数上限(服务端限制 1-500)。\n * @param sort - cost(费用) | time(创建时间) | recent(实时顺序)。\n * @param dir - asc | desc(默认 desc)。\n * @returns 会话列表(含 date/title/at 字段)。\n * Return the top N sessions across all days (each tagged with date/title/createdAt).\n * @param limit - Max rows to return (server clamps to 1-500).\n * @param sort - cost | time | recent (ledger/sidebar order).\n * @param dir - asc | desc (defaults to desc).\n * @returns Session list with date/title/at fields.\n */',
+          },
+          {
+            kind: 'method',
+            name: 'getSessionCost',
+            signature: 'getSessionCost(sessionId: string): SessionCost',
+            summary: '读取本会话跨日期账本及可选的子代理费用汇总。Read a session ledger and optional descendant costs.',
+            jsDoc: '/** 只读会话费用;后代合计不改变每日账本。Read-only cost summary; descendant costs never rewrite daily totals. */',
           },
           {
             kind: 'method',

@@ -262,10 +262,12 @@ function antigravityWindowMeta(rawWindow) {
  * - 空 group 丢弃;整包零有效 bucket → PROVIDER_PARSE_ERROR。
  */
 export function parseAntigravityQuota(payload, ctx = {}) {
-  void ctx // 无相对 reset,时钟不参与;保留形参以对齐 adapter 契约
   const warnings = []
   const windows = []
   const seen = new Set()
+  const geminiOnly = ctx?.geminiOnly === true
+  let filteredValidGroup = false
+  let keptGroup = false
   const groups = Array.isArray(payload?.groups) ? payload.groups : []
   for (let gi = 0; gi < groups.length; gi++) {
     const group = groups[gi]
@@ -274,6 +276,14 @@ export function parseAntigravityQuota(payload, ctx = {}) {
     const rawGroupTitle = pickField(group, 'displayName', 'display_name', 'name') ?? explicitId
     let groupTitle = rawGroupTitle ? String(rawGroupTitle).replace(/\s+models$/i, '').trim() : `group-${gi}`
     if (groupTitle.toLowerCase().includes('claude') && groupTitle.toLowerCase().includes('gpt')) groupTitle = 'Claude / GPT'
+    // 只保留明确标识为 Gemini 的组；未知/第三方组不按原生额度展示。
+    if (geminiOnly && !/gemini/i.test(`${rawGroupTitle ?? ''} ${explicitId ?? ''}`)) {
+      filteredValidGroup ||= Array.isArray(group.buckets) && group.buckets.some(bucket =>
+        bucket && normalQuotaFraction(pickField(bucket, 'remainingFraction', 'remaining_fraction')) !== null)
+      warnings.push('antigravity: group hidden by geminiOnly')
+      continue
+    }
+    keptGroup = true
     const groupId = slug(explicitId ?? groupTitle)
     const buckets = Array.isArray(group.buckets) ? group.buckets : []
     let added = 0
@@ -302,7 +312,7 @@ export function parseAntigravityQuota(payload, ctx = {}) {
     }
     if (added === 0) warnings.push(`antigravity: group ${groupId} 无有效 bucket,已丢弃`)
   }
-  if (windows.length === 0) {
+  if (windows.length === 0 && (!filteredValidGroup || keptGroup)) {
     throw parseError('antigravity: payload 中没有任何可解析的配额 bucket')
   }
   return { windows, warnings }

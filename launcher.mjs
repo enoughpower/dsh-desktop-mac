@@ -68,7 +68,7 @@ const PATCH_FILES = collectPatches();
 /** Build the backend environment. A Finder-launched app inherits a bare PATH,
  *  so we restore the standard macOS search path plus the Homebrew roots.
  *  The bundled `node` lives at <backend>/node; putting the backend dir first
- *  lets child processes (e.g. the dsh-vision-router plugin's vision subprocess) run
+ *  lets child processes (e.g. a bundled plugin's subprocess) run
  *  `node` against the bundled binary instead of a possibly-broken system one. */
 function buildEnv() {
   const env = { ...process.env };

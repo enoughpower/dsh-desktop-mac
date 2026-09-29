@@ -94,18 +94,22 @@ async function readPayload(response, locale) {
   } catch { throw failure(locale, 'payload') }
 }
 
-export async function queryAliyunBalance(ctx, config, { fetchImpl = fetch } = {}) {
+export async function queryAliyunBalance(ctx, config, { fetchImpl = fetch, signal } = {}) {
+  signal?.throwIfAborted()
   const locale = config?.locale
   const [ak, sk, token] = await Promise.all(ALIYUN_BALANCE_CREDENTIAL_VARS.map(name => resolveCredential(ctx, name)))
   if (!ak || !sk) throw Object.assign(failure(locale, 'missing'), { soft: true })
   let response
   try {
     // 每次网络重试重新生成时间戳与 nonce；URL、Action、body 均固定为只读账户查询。
-    response = await fetchWithRetry(ALIYUN_BALANCE_URL, {}, {
+    response = await fetchWithRetry(ALIYUN_BALANCE_URL, { signal }, {
       attempts: 2, timeoutMs: 15000,
       fetchImpl: (url, init) => fetchImpl(url, { ...signAliyunBalanceRequest(ak, sk, token), signal: init.signal }),
     })
-  } catch { throw failure(locale, 'network') }
+  } catch {
+    signal?.throwIfAborted()
+    throw failure(locale, 'network')
+  }
   if (!response.ok) {
     await response.body?.cancel().catch(() => {})
     if (response.status >= 300 && response.status < 400) throw failure(locale, 'redirect')

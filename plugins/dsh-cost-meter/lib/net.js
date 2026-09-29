@@ -5,6 +5,8 @@
  * 面板偶发报错,而 401/403 等业务错误重试无意义,仍由调用方原样处理。
  */
 
+import { gunzipSync } from 'node:zlib'
+
 /** 视为瞬时的网络错误码(Node DNS/socket 层 + undici 内部码)。 */
 const TRANSIENT_CODES = new Set([
   'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 'EHOSTUNREACH',
@@ -46,13 +48,29 @@ const sleep = (ms, signal) => new Promise((resolve, reject) => {
  * 每次尝试用 timeoutMs 新建超时信号——重试若复用已中止的 AbortSignal.timeout
  * 会立即再抛 AbortError,重试形同虚设。
  * @param {string} url - 请求地址。
- * @param {RequestInit} [init] - fetch init(headers/method/body 等)。
+ * @param {RequestInit} [init] - fetch init(headers/method/body 等);未显式指定
+ *   accept-encoding 时默认注入 identity(见函数首注释)。
  * @param {{ attempts?: number, backoffMs?: number, timeoutMs?: number }} [options]
  *   - attempts:总尝试次数(含首次),默认 4。
  *   - backoffMs:退避基数,默认 300(实际等待 backoffMs * 2^(尝试序-2))。
  *   - timeoutMs:单次尝试超时;>0 时覆盖 init.signal,默认 0(沿用调用方信号)。
  */
 export async function fetchWithRetry(url, init = {}, { attempts = 4, backoffMs = 300, timeoutMs = 0, fetchImpl = fetch } = {}) {
+  // 部分 CDN(实测 api.commandcode.ai:DSH 0.1.7 宿主的全局 undici 8 dispatcher
+  // 默认在请求头里协商 br)会返回压缩响应体却丢失 Content-Encoding 响应头——
+  // 违反 HTTP 语义,fetch 因此不做自动解压,response.json() 对着压缩字节直接报
+  // 「额度响应无法读取为有效 JSON」。brotli 流没有可靠魔数,事后嗅探无法稳健
+  // 补救(与 #172/#173 的裸 gzip 场景同族但更难防);这些接口的响应都很小,压缩
+  // 本无收益,故调用方未显式指定时统一默认 accept-encoding: identity 关闭
+  // 内容协商,从请求侧根除,显式指定的值不被覆盖。仅对纯对象形态的 headers
+  // 注入(本仓库所有调用方均如此)且不改其形状,Headers 实例等其余形态原样透传。
+  const headers = init.headers
+  if (headers === undefined || headers === null) {
+    init = { ...init, headers: { 'accept-encoding': 'identity' } }
+  } else if (typeof headers === 'object' && typeof headers.entries !== 'function'
+    && !Object.keys(headers).some(name => name.toLowerCase() === 'accept-encoding')) {
+    init = { ...init, headers: { ...headers, 'accept-encoding': 'identity' } }
+  }
   const request = typeof fetchImpl === 'function' ? fetchImpl : fetch
   for (let attempt = 1; ; attempt++) {
     init.signal?.throwIfAborted()
@@ -76,6 +94,24 @@ export async function fetchWithRetry(url, init = {}, { attempts = 4, backoffMs =
   }
 }
 
+/**
+ * 裸 gzip 正文的解压兜底(issue #172):个别 CDN 边缘(实测 MiFE/3.4.34)会返回
+ * gzip 压缩字节却不带 Content-Encoding/Content-Type;undici 只按 Content-Encoding
+ * 解码,这类正文会以乱码进入 JSON.parse,报 "response body is not valid JSON"。
+ * JSON 文本不可能以 gzip 魔数(1f 8b)开头,按魔数识别无误判风险;解压输出同样受
+ * maxBytes 约束(maxOutputLength),压缩体膨胀超限按 tooLarge 处理,防止小压缩体
+ * 绕过读取上限;解压失败(伪魔数/损坏流)保留原字节,交给 JSON.parse 统一报
+ * 不回显正文的解析错误。
+ */
+const decodeBoundedBody = (buffer, maxBytes, tooLarge) => {
+  if (buffer.length < 2 || buffer[0] !== 0x1f || buffer[1] !== 0x8b) return buffer
+  try { return gunzipSync(buffer, { maxOutputLength: maxBytes }) }
+  catch (error) {
+    if (error?.code === 'ERR_BUFFER_TOO_LARGE') throw tooLarge()
+    return buffer
+  }
+}
+
 /** 流式限制实际响应体，不依赖可能缺失或不准确的 Content-Length。 */
 export async function readJsonBounded(response, maxBytes = 262144) {
   const tooLarge = () => Object.assign(new Error('response body is too large'), { code: 'RESPONSE_TOO_LARGE' })
@@ -95,7 +131,7 @@ export async function readJsonBounded(response, maxBytes = 262144) {
       if (bytes > maxBytes) throw tooLarge()
       chunks.push(buffer)
     }
-    return parse(Buffer.concat(chunks).toString('utf8'))
+    return parse(decodeBoundedBody(Buffer.concat(chunks), maxBytes, tooLarge).toString('utf8'))
   }
   // 兼容没有流接口的 adapter/测试替身；标准 Node Response 均走上面的有界流读取。
   const text = typeof response.text === 'function' ? await response.text() : JSON.stringify(await response.json())

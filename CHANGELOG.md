@@ -106,4 +106,18 @@
   页签及其面板），并移除注册补丁 `git.patch.yml`、构建拷贝行与 README 对应章节；
   应用不再内置 Git 面板与文件浏览页签。
 
+## 2026-09-29
+
+- **升级**：`@deepseek-ai/dsh` 0.1.5-rc.2 → 0.2.0-rc.1（应用版本 1.0.3 → 1.0.4）。
+  注：npm 上 `0.2.0-rc.2` 的依赖未发布完整（`@deepseek-ai/dsh-client-ui-settings-account@0.2.0-rc.2` 缺失）无法安装，
+  故采用当前可完整安装的最新 0.2.0 版本 `0.2.0-rc.1`。
+- **移除不兼容插件**：0.2.0 移除了旧的 `settingsScope` 客户端设置服务且客户端 primitives 有变更：
+  - `dsh-skills`、`@opendsh/dsh-plugin-setting-mcp`、`dsh-vision-router`：无法激活（0.1.7 起即不兼容）；
+  - `dsh-pocket`：客户端 slot 崩溃（React #130，`sidebar.footer.action` / `shell.overlay`），一并移除。
+  同步删除各自 `plugins/` 源码、`skills-hub`/`mcp-settings`/`vision`/`pocket.patch.yml`、build.sh 拷贝行与 README 章节。
+- **插件升级**：dsh-cost-meter 1.7.20 → 1.7.45（声明兼容 0.2.0-rc.1）。
+- **体积**：0.2.0 新增文档预览运行时（`@deepseek-ai/libreoffice-kit-darwin-arm64` ~200M）与语音运行时
+  （`sherpa-onnx-darwin-arm64` ~33M），App 249M → 451M、DMG ~80M → ~176M；README（中/英）体积与内存表同步更新。
+- **注意**：用户级插件 `dsh-pet@0.2.0-hevc` 的 peerDependencies 仍为 0.1.x 线，0.2.0 启动时被跳过（需作者适配或手动 allow-version）。
+
 

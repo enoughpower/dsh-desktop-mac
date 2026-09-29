@@ -1,7 +1,7 @@
 /**
  * 历史账本按模型回填:按模型统计(byProviderModel)上线之前的账本只有
  * 每日/会话合计,没有 provider:model 拆分。本模块回放宿主会话日志
- * ($DSH_HOME/sessions/<项目>/<会话>/session.jsonl[.zstd]),按与 costUsage
+ * ($DSH_HOME/sessions/<项目>/<会话>/session[.vN].jsonl[.zstd]),按与 costUsage
  * 投影一致的逻辑逐次重建用量,并按事件时刻的档位(峰谷时代前按
  * legacyBase 历史价)计算费用,回填到账本中 byProviderModel 为空的
  * 日期与会话条目。
@@ -10,14 +10,15 @@
  * 避免与实时计费重复计数。会话日志是宿主的只读数据,本模块从不写入。
  */
 
-import { readdirSync, statSync } from 'node:fs'
 import { open } from 'node:fs/promises'
-import { join } from 'node:path'
 import * as zlib from 'node:zlib'
 import { costOf, providerPriceEntryFor, usdFromCost, isWrapperProviderId, wrapperUpstreamProvider } from './pricing.js'
 import { localDayKey, zeroDay, splitLedgerApiCost } from './store.js'
 import { billingClassOf, enabledPlanSetOf } from './plan-billing.js'
 import { USAGE_DEDUP_WINDOW_MS, usageFingerprint } from './usage-dedup.js'
+import { isNativeSearchUsageEvent } from './native-search-events.js'
+import { listSessionLogFiles } from './session-log-files.js'
+import { listNativeSearchHistory, readNativeSearchHistory, nativeSearchRecordsFor } from './native-search-history.js'
 
 const ZSTD_MAGIC = 4247762216
 /** 打包行(文本/推理/工具调用增量游程)不含 header 与 usage,回放时跳过。 */
@@ -244,45 +245,38 @@ export async function readSessionRecordsAsync(path, options = {}) {
 }
 
 /**
- * 枚举会话根目录下全部会话日志路径(<root>/<项目>/<会话>/session.jsonl[.zstd])。
+ * 枚举每个会话最高数字代际的日志路径(session[.vN].jsonl[.zstd])。
  * @param root - 会话根目录。
  * @param onlySessionIds - 可选:仅枚举这些会话目录(Set<会话 id>)。纯标题/时间戳
  *   补齐时按缺失会话定向,避免为补齐一两个标题全量读取全部会话日志(其中可能
  *   含解压后数百 MB 的大文件)。null = 全部。
  */
 export function listSessionLogs(root, onlySessionIds = null) {
-  const paths = []
-  let projects
-  try {
-    projects = readdirSync(root, { withFileTypes: true })
-  } catch {
-    return paths
-  }
-  for (const project of projects) {
-    if (!project.isDirectory()) continue
-    let sessions
-    try {
-      sessions = readdirSync(join(root, project.name), { withFileTypes: true })
-    } catch {
-      continue
+  return listSessionLogFiles(root, onlySessionIds)
+}
+
+/** Merge the plugin journal before replay, so UUID dedup also covers repaired v1.7.21 logs. */
+async function* sessionBillingRecords(ledger, sessionsRoot, onlySessionIds = null) {
+  const seen = new Set()
+  for (const path of listSessionLogs(sessionsRoot, onlySessionIds)) {
+    let records
+    try { records = await readSessionRecordsAsync(path) } catch { yield null; continue }
+    const id = records.find(record => record.type === 'session')?.id
+    if (typeof id === 'string') {
+      seen.add(id)
+      try { for (const record of await nativeSearchRecordsFor(ledger.path, id)) records.push(record) } catch { /* Keep the readable host prefix. */ }
     }
-    for (const session of sessions) {
-      if (!session.isDirectory()) continue
-      if (onlySessionIds !== null && !onlySessionIds.has(session.name)) continue
-      for (const name of ['session.jsonl.zstd', 'session.jsonl']) {
-        const path = join(root, project.name, session.name, name)
-        try {
-          if (statSync(path).isFile()) {
-            paths.push(path)
-            break // 同一会话两种编码互斥,取先命中者
-          }
-        } catch {
-          // 不存在:继续尝试另一后缀。
-        }
-      }
-    }
+    yield records
   }
-  return paths
+  // A deleted/missing host log must not discard the plugin's surviving search history.
+  for (const path of listNativeSearchHistory(ledger.path, seen, onlySessionIds)) {
+    let history
+    try { history = await readNativeSearchHistory(path) } catch { continue }
+    const id = history.sessionId
+    if (!id || seen.has(id) || (onlySessionIds !== null && !onlySessionIds.has(id))) continue
+    seen.add(id)
+    yield [{ type: 'session', id, createdAt: 0 }, ...history.records]
+  }
 }
 
 /**
@@ -358,10 +352,13 @@ export function replaySessionRecords(records, config, wantDates = null) {
     if (event.type === 'assistant/chunk' && event.data?.chunk?.type === 'usage' && event.data.chunk.usage != null) u = event.data.chunk.usage
     else if (event.type === 'assistant/message' && event.data?.usage != null) u = event.data.usage
     else continue
-    if (isWrapperProviderId(preProvider)) continue
+    const source = event.type === 'assistant/message' ? event.data?.message?.source : null
+    const sampleProvider = typeof source?.provider === 'string' && source.provider.length > 0 ? source.provider : preProvider
+    const sampleModel = typeof source?.model === 'string' && source.model.length > 0 ? source.model : preModel
+    if (isWrapperProviderId(sampleProvider)) continue
     const at = Number(event.time)
     if (!Number.isFinite(at) || at <= 0) continue
-    const fp = usageFingerprint(preModel, {
+    const fp = usageFingerprint(sampleModel, {
       input: num(u.inputTokens), output: num(u.outputTokens), cacheRead: num(u.cacheReadTokens),
       cacheWrite: num(u.cacheWriteTokens), reasoning: num(u.reasoningTokens),
     })
@@ -371,6 +368,7 @@ export function replaySessionRecords(records, config, wantDates = null) {
   }
   // 本回放已计入的改挂样本(fp + 时刻):包装层重复分发(窗口内同指纹两次)只计一次。
   let remappedAdmitted = []
+  const nativeSearchIds = new Set()
   for (const event of records) {
     if (event === null || typeof event !== 'object') continue
     if (event.type === 'session' && typeof event.id === 'string') {
@@ -407,6 +405,7 @@ export function replaySessionRecords(records, config, wantDates = null) {
     // model,两代宿主形态 data.message.source.{provider,model} 与
     // data.{provider,model} 都兼容),仅作用于本样本;去重键独立于循环步。
     let isCompaction = false
+    const isNativeSearch = isNativeSearchUsageEvent(event)
     // 判空与去重键缺省值与 index.js 投影完全同构(usage null 不入账;turn/step
     // 缺省 0,保证实时投影与回放对同一事件产生同一 (turn,step) 去重键)。
     if (event.type === 'assistant/chunk' && event.data?.chunk?.type === 'usage' && event.data.chunk.usage != null) {
@@ -417,13 +416,17 @@ export function replaySessionRecords(records, config, wantDates = null) {
       usage = event.data.usage
       turn = event.data.turn ?? 0
       step = event.data.step ?? 0
+    } else if (isNativeSearch && event.data?.usage != null && typeof event.data.requestId === 'string') {
+      if (nativeSearchIds.has(event.data.requestId)) continue
+      nativeSearchIds.add(event.data.requestId)
+      usage = event.data.usage
     } else if (event.type === 'compaction/summary' && event.data?.usage != null) {
       usage = event.data.usage
       isCompaction = true
     } else {
       continue
     }
-    const atMs = eventMs
+    const atMs = isNativeSearch ? Number(event.data.startedAtMs) : eventMs
     if (!Number.isFinite(atMs) || atMs <= 0) continue
     const date = localDayKey(atMs)
     if (wantDates !== null && !wantDates.has(date)) continue
@@ -437,7 +440,12 @@ export function replaySessionRecords(records, config, wantDates = null) {
     // 摘要样本的事件自带路由(header 状态不受影响,后续循环步仍按其 header 计费)。
     let sampleProvider = provider
     let sampleModel = model
-    if (isCompaction) {
+    if (event.type === 'assistant/message') {
+      const source = event.data?.message?.source
+      if (typeof source?.provider === 'string' && source.provider.length > 0) sampleProvider = source.provider
+      if (typeof source?.model === 'string' && source.model.length > 0) sampleModel = source.model
+    }
+    if (isCompaction || isNativeSearch) {
       const source = event.data?.message?.source ?? {}
       if (typeof source.provider === 'string' && source.provider.length > 0) sampleProvider = source.provider
       else if (typeof event.data.provider === 'string' && event.data.provider.length > 0) sampleProvider = event.data.provider
@@ -454,7 +462,7 @@ export function replaySessionRecords(records, config, wantDates = null) {
     let effectiveProvider = sampleProvider
     if (isWrapperProviderId(sampleProvider)) {
       effectiveProvider = wrapperUpstreamProvider(sampleProvider) ?? sampleProvider
-      if (!isCompaction) {
+      if (!isCompaction && !isNativeSearch) {
         const fp = usageFingerprint(sampleModel, buckets)
         remappedAdmitted = remappedAdmitted.filter(entry => atMs - entry.at <= USAGE_DEDUP_WINDOW_MS)
         const plainTimes = plainFingerprints.get(fp)
@@ -463,7 +471,7 @@ export function replaySessionRecords(records, config, wantDates = null) {
         remappedAdmitted.push({ fp, at: atMs })
       }
     }
-    const key = isCompaction
+    const key = isNativeSearch ? `search:${event.data.requestId}` : isCompaction
       ? `compaction:${Number.isFinite(Number(event.seq)) && Number(event.seq) >= 0 ? Number(event.seq) : 't' + String(event.time ?? '')}`
       : `${turn}:${step}`
     // 去重与旧版完全一致:单一 (turn,step) 状态机跨种子/own 段连续生效;
@@ -485,13 +493,12 @@ export function replaySessionRecords(records, config, wantDates = null) {
       enabled: resolved.billingMode === 'deepseek-peak' && config?.peakEnabled === true,
       effectiveAtMs: Date.parse(config?.peakEffectiveAt ?? ''),
       windows: config?.peakWindows,
+      holidays: config?.peakHolidays,
     }
     // 官方价格币种为人民币(issue #47)时,DeepSeek 主表计出的成本为人民币,
     // 按展示汇率折算为美元入账——与 store.account() 完全同口径。
     const priced = resolved.priced ? costOf(buckets, resolved.entry, atMs, peak) : 0
-    const cost = usdFromCost(priced,
-      resolved.billingMode === 'deepseek-peak' && config?.prices?.currency === 'CNY' ? 'CNY' : 'USD',
-      config?.exchangeRate)
+    const cost = usdFromCost(priced, resolved.currency, config?.exchangeRate)
     // Plan/API 双轨分类(issue #64):与 store.account() 同一分类器,回放条目
     // 的 apiCost 只含真金白银部分(plan 类金额仅记等值);传 prices 供路由判定。
     const apiCost = billingClassOf(effectiveProvider, sampleModel, config?.planBilling, enabledPlanSetOf(config), config?.prices) === 'api' ? cost : 0
@@ -501,7 +508,7 @@ export function replaySessionRecords(records, config, wantDates = null) {
     if (prev !== null) shift(prev, -1, prev.seed ? seedDays : days)
     const sample = { key, date, providerKey, buckets, cost, apiCost, seed: isSeed }
     shift(sample, 1, isSeed ? seedDays : days)
-    last = sample
+    if (!isNativeSearch) last = sample
   }
   return { sessionId, title, createdAt, days, seedDays }
 }
@@ -563,14 +570,15 @@ export async function backfillLegacyLedger(ledger, sessionsRoot) {
       }
     }
   }
-  for (const path of listSessionLogs(sessionsRoot, onlySessionIds)) {
+  for await (const records of sessionBillingRecords(ledger, sessionsRoot, onlySessionIds)) {
     // 会话日志多时逐份解压会长时间占住事件循环:每 8 份让出一次,不卡宿主 UI;
     // 单文件内部亦为流式读取(v1.7.7,issue #88:解压期间周期性让出,大日志不再卡死宿主)。
     if ((scannedCount += 1) % 8 === 0) await new Promise(resolve => setImmediate(resolve))
     result.scanned += 1
     let replayed
     try {
-      replayed = replaySessionRecords(await readSessionRecordsAsync(path), ledger.config, needDates.size > 0 ? needDates : new Set(['-']))
+      if (records === null) continue
+      replayed = replaySessionRecords(records, ledger.config, needDates.size > 0 ? needDates : new Set(['-']))
     } catch {
       continue // 单文件损坏(含解压预算超限)不阻断整体回填。
     }
@@ -804,12 +812,13 @@ export async function importLegacyHistory(ledger, sessionsRoot) {
   const result = { days: 0, sessions: 0, scanned: 0 }
   const bySession = new Map()
   let scannedCount = 0
-  for (const path of listSessionLogs(sessionsRoot)) {
+  for await (const records of sessionBillingRecords(ledger, sessionsRoot)) {
     if ((scannedCount += 1) % 8 === 0) await new Promise(resolve => setImmediate(resolve))
     result.scanned += 1
     let replayed
     try {
-      replayed = replaySessionRecords(await readSessionRecordsAsync(path), ledger.config, null)
+      if (records === null) continue
+      replayed = replaySessionRecords(records, ledger.config, null)
     } catch {
       continue // 单文件损坏(含解压预算超限)不阻断整体导入。
     }
@@ -896,14 +905,15 @@ export async function importLegacyHistory(ledger, sessionsRoot) {
  * @param includeBucket - 可选的 (providerModelKey, date) 过滤器，仅修复目标价格路径。
  * @returns {{ scanned, recostedSessions, skippedSessions, recostedDays }}。
  */
-export async function recomputeLedgerPricingBasis(ledger, sessionsRoot, includeBucket) {
+export async function recomputeLedgerPricingBasis(ledger, sessionsRoot, includeBucket, onlySessionIds = null) {
   const result = { scanned: 0, recostedSessions: 0, skippedSessions: 0, recostedDays: 0 }
   const bySession = new Map()
-  for (const path of listSessionLogs(sessionsRoot)) {
+  for await (const records of sessionBillingRecords(ledger, sessionsRoot, onlySessionIds)) {
     if ((result.scanned += 1) % 8 === 0) await new Promise(resolve => setImmediate(resolve))
     let replayed
     try {
-      replayed = replaySessionRecords(await readSessionRecordsAsync(path), ledger.config, null)
+      if (records === null) continue
+      replayed = replaySessionRecords(records, ledger.config, null)
     } catch {
       continue // 单文件损坏(含解压预算超限)不阻断整体重算。
     }

@@ -5,7 +5,7 @@
  * 响应解析器。解析器为纯函数(可单测);网络与凭据解析在宿主侧(index.js)。
  *
  * 归一化输出:windows = { [name]: { percent: 0-100, resetsAt: ISO 字符串 } }。
- * 凭证安全:每个 adapter 的 URL 均为硬编码官方域名,Key 永不发往其它域。
+ * 凭证安全:默认使用官方域名；MiniMax 可显式指定 HTTPS origin，仅向该 origin 发 Key，拒绝重定向。
  *
  * 实测确认(2026-08):
  *  - Anthropic OAuth usage 端点存活(未授权返回限流/401);
@@ -26,12 +26,14 @@
  *    / GetAFPUsage / GetPersonalPlan,Version=2024-01-01,service=ark,region=cn-beijing,AK/SK+HMAC 签名,
  *    需控制台创建 IAM 子用户并授予 ArkReadOnlyAccess + BillingCenterReadOnlyAccess,窗口五小时/周/月三档,
  *    参考 https://www.volcengine.com/docs/82379/1298459 与 CCswitch 已实现的签名要点,issue #60);
- *  - 百炼 Coding Plan / OpenAI Codex / Gemini Code Assist / GitHub Copilot 个人版暂无 API-Key 化公开用量端点(仅控制台/组织级 API),不接入。
+ *  - 百炼无 API-Key 化用量端点,但官方百炼 CLI(bl)可查 Token/Coding Plan——经千问卡片 quotaSource:'bailian'
+ *    接入(lib/bailian-cli.js 子进程桥),本 adapter 不接;OpenAI Codex / Gemini Code Assist / GitHub Copilot
+ *    个人版仍无公开用量端点(仅控制台/组织级 API),不接入。
  */
 
 import { createHash, createHmac } from 'node:crypto'
 
-import { fetchWithRetry } from './net.js'
+import { fetchWithRetry, readJsonBounded } from './net.js'
 
 export const CODING_PLAN_PROVIDERS = {
   anthropic: {
@@ -92,14 +94,41 @@ export const CODING_PLAN_PROVIDERS = {
   qwen: {
     label: '千问 Qwen Token Plan',
     credentialEnvs: [],
-    // 千问 Token Plan(个人版,platform.qianwenai.com)未提供 API-Key 化的额度查询端点:
-    // 额度仅控制台可见(网关 cookie + sec_token 会话),不走网络。与 SCNet 同模式:
-    // 按官方 Credits 抵扣率由本地账本估算,无需任何凭据(issue #78)。
-    keyHint: '无需凭据:按官方 Credits 抵扣率由本地账本估算月度用量(抵扣率可在设置中修改)',
+    // 本地估算保持默认；可选择已登录的官方 qianwen CLI 查询订阅快照(#146)。
+    keyHint: '本地估算无需凭据；官方 CLI 模式需在 DSH 主机运行 qianwen auth login',
+  },
+  mimo: {
+    label: '小米 MiMo Token Plan',
+    // 额度查询走小米开放平台控制台 API(仅小米账号 SSO Cookie 鉴权,tp-*/ttp-* 专用
+    // Key 无用量端点),凭据为整段 Cookie 头(必需 api-platform_serviceToken(或
+    // serviceToken)与 userId 字段,过期后需重新复制)。
+    credentialEnvs: ['MIMO_COOKIE', 'XIAOMI_MIMO_COOKIE'],
+    keyHint: '小米开放平台控制台 Cookie(登录 platform.xiaomimimo.com 后 F12→网络→balanceAlertConfig→请求头 cookie 整段复制)',
   },
 }
 
 export const CODING_PLAN_PROVIDER_IDS = Object.keys(CODING_PLAN_PROVIDERS)
+
+// ── 小米 MiMo Token Plan ─────────────────────────────────────────────
+//
+// 额度查询走控制台 API(https://platform.xiaomimimo.com/api/v1,Cookie 鉴权;
+// 端点与响应结构由 PR #166 贡献者实测,并参照 CodexBar 的 MiMoUsageFetcher):
+//   GET /tokenPlan/usage  → data.monthUsage.items[{ name, used, limit, percent }]
+//   GET /tokenPlan/detail → data.{ planCode, currentPeriodEnd, expired }(周期截止=重置时刻)
+//   GET /balance          → data.{ balance, currency, cashBalance, giftBalance, ... }
+// 服务编排(tp-*/ttp-* 专用 Key)在 token-plan-{cn,sgp,ams}.xiaomimimo.com 上只有推理
+// 端点,无任何用量端点(实测 404),故不支持 Key 鉴权。
+export const MIMO_API_BASE = 'https://platform.xiaomimimo.com/api/v1'
+export const MIMO_ENDPOINTS = {
+  usage: `${MIMO_API_BASE}/tokenPlan/usage`,
+  detail: `${MIMO_API_BASE}/tokenPlan/detail`,
+  balance: `${MIMO_API_BASE}/balance`,
+}
+/** 与 lib/plan-billing.js 的 plan 轨分类联动:DSH 侧常见 provider id 都归到 mimo。 */
+export const MIMO_TOKEN_PLAN_PROVIDER_IDS = [
+  'mimo', 'xiaomimimo', 'mimo-token-plan', 'xiaomi-token-plan',
+  'xiaomi-token-plan-cn', 'xiaomi-token-plan-sgp', 'xiaomi-token-plan-ams',
+]
 
 /** 归一化百分比:0-1 视为小数,>=1 视为已是百分数;非法 → null。 */
 export function normalizePercent(value) {
@@ -254,11 +283,12 @@ function clampPct(p) {
  */
 function remainingPercentOf(row, remainPctKey, totalKey, usedKey, remainKey) {
   if (row === null || typeof row !== 'object') return null
-  const rp = Number(row[remainPctKey])
+  const numeric = key => row[key] == null || row[key] === '' ? NaN : Number(row[key])
+  const rp = numeric(remainPctKey)
   if (Number.isFinite(rp)) return Math.min(100, Math.max(0, rp <= 1 ? rp * 100 : rp))
-  const total = Number(row[totalKey])
-  const used = Number(row[usedKey])
-  const remain = Number(row[remainKey])
+  const total = numeric(totalKey)
+  const used = numeric(usedKey)
+  const remain = numeric(remainKey)
   if (Number.isFinite(total) && total > 0) {
     if (Number.isFinite(remain)) return (remain / total) * 100
     if (Number.isFinite(used)) return ((total - used) / total) * 100
@@ -268,12 +298,14 @@ function remainingPercentOf(row, remainPctKey, totalKey, usedKey, remainKey) {
 
 /**
  * 从单条 MiniMax 记录抽出 5h / 7d 窗口。percent 存已用%(与其它厂商一致);
- * status=3 表示不限量,跳过该窗。
+ * status=3 表示不限量,保留显式标记；未知窗口不推断为无限量。
  */
 function windowsFromMiniMaxRecord(row) {
   if (row === null || typeof row !== 'object') return {}
   const windows = {}
-  if (Number(row.current_interval_status) !== 3) {
+  if (Number(row.current_interval_status) === 3) {
+    windows['5h'] = { unlimited: true, text: '∞', resetsAt: '' }
+  } else {
     const remain = remainingPercentOf(
       row,
       'current_interval_remaining_percent',
@@ -288,7 +320,9 @@ function windowsFromMiniMaxRecord(row) {
       }
     }
   }
-  if (Number(row.current_weekly_status) !== 3) {
+  if (Number(row.current_weekly_status) === 3) {
+    windows['7d'] = { unlimited: true, text: '∞', resetsAt: '' }
+  } else {
     const remain = remainingPercentOf(
       row,
       'current_weekly_remaining_percent',
@@ -308,7 +342,7 @@ function windowsFromMiniMaxRecord(row) {
 
 /** 选 chat/通用额度行:general → MiniMax-M* → 第一条能解析出窗口的记录。跳过仅 video/speech 的无限量行。 */
 function pickMiniMaxModelRow(rows) {
-  const list = rows.filter(row => row !== null && typeof row === 'object')
+  const list = rows.filter(row => row !== null && typeof row === 'object' && !/^(video|speech|audio|image)(?:$|[-_])/i.test(String(row.model_name ?? '')))
   const byName = name => list.find(row => String(row.model_name ?? '').toLowerCase() === name)
   return byName('general')
     ?? list.find(row => /^minimax-m/i.test(String(row.model_name ?? '')))
@@ -512,6 +546,113 @@ export function parseCommandCodeCredits(data) {
     if (win !== null) windows.monthly = win
   }
   return Object.keys(windows).length > 0 ? windows : null
+}
+
+// ── 小米 MiMo Token Plan ─────────────────────────────────────────────
+
+/**
+ * 归一化 MiMo 控制台 Cookie(整段 Cookie 头粘贴)。容忍前缀 "Cookie:"、整体引号与
+ * 换行;必需 userId 与 serviceToken(api-platform_serviceToken 或 serviceToken)两族
+ * 字段,缺一即视为无效(与 CodexBar 同口径)。返回归一化 Cookie 串;无效 → null。
+ */
+export function normalizeMimoCookie(value) {
+  let s = typeof value === 'string' ? value.trim() : ''
+  if (s.length === 0) return null
+  s = s.replace(/^(?:cookie|set-cookie)\s*:\s*/i, '').replace(/[\r\n]+/g, ' ').trim()
+  if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) s = s.slice(1, -1).trim()
+  if (s.length === 0) return null
+  const parts = s.split(';').map(part => part.trim()).filter(Boolean)
+  if (parts.some(part => !/^[^=\s]+=[^;]*$/.test(part))) return null
+  const populated = parts.filter(part => part.slice(part.indexOf('=') + 1).replace(/^["']|["']$/g, '').trim())
+  const hasToken = populated.some(part => /^(?:api-platform_)?serviceToken=/.test(part))
+  const hasUser = populated.some(part => /^userId=/.test(part))
+  return hasToken && hasUser ? s : null
+}
+
+// Reject JSON null/booleans/empty strings rather than showing a fabricated zero.
+const mimoNumber = value => {
+  if (typeof value !== 'number' && (typeof value !== 'string' || !value.trim())) return null
+  const n = Number(value)
+  return Number.isFinite(n) ? n : null
+}
+
+/**
+ * 解析 MiMo Token Plan 用量响应(GET https://platform.xiaomimimo.com/api/v1/tokenPlan/usage)。
+ * 官方形态 { code:0, data:{ monthUsage:{ percent, items:[{ name, used, limit, percent }] } } };
+ * 兼容社区文档的 data.usage.items 形态与顶层 items。items.name 已知值映射为语义窗口
+ * (month_total_token/plan_total_token → plan 套餐积分,compensation_total_token →
+ * compensation 补偿积分),未知 name 原样作窗口名。percent 为已用口径(percent 字段是
+ * used/limit 小数,优先用 used/limit 直算,规避 1% 边界的归一歧义)。重置时刻在
+ * tokenPlan/detail 里,由 queryCodingPlan 回填。
+ */
+export function parseMimoTokenPlanUsage(data) {
+  if (data === null || typeof data !== 'object') return null
+  const root = data.data !== null && typeof data.data === 'object' ? data.data : data
+  let items = null
+  for (const bucket of [root.monthUsage, root.usage, root]) {
+    if (bucket !== null && typeof bucket === 'object' && Array.isArray(bucket.items)) { items = bucket.items; break }
+  }
+  if (items === null) return null
+  const windows = {}
+  items.forEach((row, index) => {
+    if (row === null || typeof row !== 'object') return
+    const nameRaw = typeof row.name === 'string' && row.name.length > 0 ? row.name : ''
+    const key = nameRaw === 'month_total_token' || nameRaw === 'plan_total_token' ? 'plan'
+      : nameRaw === 'compensation_total_token' ? 'compensation'
+        : nameRaw.length > 0 ? nameRaw : 'window' + String(index + 1)
+    if (['__proto__', 'constructor', 'prototype'].includes(key)) return
+    const total = mimoNumber(row.limit ?? row.total)
+    const used = mimoNumber(row.used)
+    let pct = null
+    if (Number.isFinite(total) && total > 0 && Number.isFinite(used) && used >= 0) pct = (used / total) * 100
+    else {
+      const fraction = mimoNumber(row.percent)
+      if (fraction !== null && fraction >= 0) pct = fraction * 100
+    }
+    if (pct === null || !Number.isFinite(pct)) return
+    windows[key] = {
+      percent: clampPct(pct),
+      resetsAt: normalizeResetAt(row.reset_at ?? row.resetsAt ?? row.resetAt ?? ''),
+    }
+  })
+  return Object.keys(windows).length > 0 ? windows : null
+}
+
+/**
+ * 解析 MiMo 套餐详情响应(GET https://platform.xiaomimimo.com/api/v1/tokenPlan/detail)。
+ * 形如 { code:0, data:{ planCode:'standard', currentPeriodEnd:'2026-05-04 23:59:59', expired:false } }。
+ * currentPeriodEnd 为「yyyy-MM-dd HH:mm:ss」裸串:控制台按北京时间展示,23:59:59 即自然
+ * 日界,故按 Asia/Shanghai(+08:00)解释(CodexBar 按 UTC 解析与此不一致,以控制台口径为准)。
+ * 返回 { planCode, expired, resetsAt };非法 → null。
+ */
+export function parseMimoTokenPlanDetail(data) {
+  if (data === null || typeof data !== 'object') return null
+  const d = data.data !== null && typeof data.data === 'object' ? data.data : data
+  const planCode = typeof d.planCode === 'string' ? d.planCode.trim() : ''
+  const expired = d.expired === true
+  const raw = typeof d.currentPeriodEnd === 'string' ? d.currentPeriodEnd.trim() : ''
+  let resetsAt = ''
+  if (raw.length > 0) {
+    const m = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}(?::\d{2})?)$/.exec(raw)
+    const isoish = m === null ? raw : `${m[1]}T${m[2].length === 5 ? m[2] + ':00' : m[2]}+08:00`
+    resetsAt = normalizeResetAt(isoish)
+  }
+  return { planCode, expired, resetsAt }
+}
+
+/**
+ * 解析 MiMo 余额响应(GET https://platform.xiaomimimo.com/api/v1/balance)。
+ * 形如 { code:0, data:{ balance:'25.51', currency:'USD', cashBalance:'20', giftBalance:'5.51' } }
+ * (数值为字符串)。输出「带币种符号的余额」文本;非法 → null。
+ */
+export function parseMimoBalance(data) {
+  if (data === null || typeof data !== 'object') return null
+  const d = data.data !== null && typeof data.data === 'object' ? data.data : data
+  const n = mimoNumber(d.balance ?? d.cashBalance)
+  if (n === null || n < 0) return null
+  const cur = String(d.currency ?? '').trim().toUpperCase()
+  const symbol = cur === 'CNY' || cur === 'RMB' ? '¥' : cur === 'USD' ? '$' : cur.length > 0 ? cur + ' ' : ''
+  return symbol + n.toFixed(2)
 }
 
 // ── 火山方舟 Volcano Ark Coding Plan(issue #60)──────────────────────────
@@ -962,7 +1103,7 @@ export function qwenTokenPlanWindows(days, entry, nowMs, includeCall) {
   }
 }
 
-/** 各家固定官方端点(硬编码白名单;region 变体按序尝试)。 */
+/** 默认官方端点；MiniMax 可用显式 HTTPS origin 覆盖此列表。 */
 export const CODING_PLAN_ENDPOINTS = {
   anthropic: ['https://api.anthropic.com/api/oauth/usage'],
   zai: [
@@ -977,8 +1118,10 @@ export const CODING_PLAN_ENDPOINTS = {
     'https://open.bigmodel.cn/api/coding/paas/v4/dashboard/billing/coding_plan/usage',
   ],
   minimax: [
-    'https://www.minimaxi.com/v1/token_plan/remains',
+    'https://www.minimax.cn/v1/token_plan/remains',
     'https://www.minimax.io/v1/token_plan/remains',
+    'https://www.minimaxi.com/v1/token_plan/remains',
+    'https://www.minimax.cn/v1/api/openplatform/coding_plan/remains',
     'https://www.minimaxi.com/v1/api/openplatform/coding_plan/remains',
   ],
   kimi: [
@@ -994,10 +1137,12 @@ export const CODING_PLAN_ENDPOINTS = {
   commandcode: ['https://api.commandcode.ai/alpha/billing/credits'],
   // SCNet 无 API-Key 化额度端点:本地 Credits 计量(见 scnetTokenPlanWindows),不走网络。
   scnet: [],
-  // 千问 Token Plan 无 API-Key 化额度端点:本地 Credits 计量(见 qwenTokenPlanWindows),不走网络。
+  // 千问由本地估算或 qwen-cli.js 调用官方 CLI；插件不托管 CLI 登录凭据。
   qwen: [],
   // 火山方舟:管控面 OpenAPI(需 AK/SK+HMAC,非 Bearer),按 Action 变体尝试(见 VOLCENGINE_ACTIONS)
   volcengine: VOLCENGINE_ACTIONS.map(action => `https://${VOLCENGINE_HOST}/?Action=${action}&Version=${VOLCENGINE_VERSION}`),
+  // MiMo 主端点即用量;detail/balance 由 queryCodingPlan 的 mimo 分支作为增强行尽力拉取。
+  mimo: [MIMO_ENDPOINTS.usage],
 }
 
 const CODING_PLAN_PARSERS = {
@@ -1009,6 +1154,27 @@ const CODING_PLAN_PARSERS = {
   siliconflow: parseSiliconFlowInfo,
   commandcode: parseCommandCodeCredits,
   volcengine: parseVolcengineUsage,
+  mimo: parseMimoTokenPlanUsage,
+}
+
+/** 空串为自动选择；自定义地址只接受 HTTPS origin，避免路径、凭据和重定向改变 Key 的目的地。 */
+export function normalizeMiniMaxBaseUrl(value) {
+  if (value === undefined || value === '') return ''
+  if (typeof value !== 'string' || value.length > 2048) return null
+  const text = value.trim()
+  if (!text) return ''
+  if (!/^https:\/\/[^/?#]+\/?$/i.test(text) || /[\s\\@?#]/.test(text)) return null
+  try {
+    const url = new URL(text)
+    if (!url.hostname || url.username || url.password || url.pathname !== '/') return null
+    return url.origin
+  } catch { return null }
+}
+
+export function miniMaxEndpoints(baseUrl) {
+  const origin = normalizeMiniMaxBaseUrl(baseUrl)
+  if (origin === null) throw new Error('MiniMax: invalid HTTPS origin')
+  return origin ? ['/v1/token_plan/remains', '/v1/api/openplatform/coding_plan/remains'].map(path => origin + path) : CODING_PLAN_ENDPOINTS.minimax
 }
 
 /**
@@ -1059,9 +1225,10 @@ export function normalizeVolcengineKey(key) {
  * @param key - 已解析出的 API Key / OAuth token;火山方舟可为 { accessKeyId, secretAccessKey } 或 "AK:SK" 字符串;null 表示未找到。
  * @param locale - 消息语言(zh/en)。
  * @param t - 服务端文案函数 tmsg(locale, code, vars)。
+ * @param options - MiniMax 可指定 baseUrl 和取消 signal；留空保留官方回退链。
  * @returns {Promise<{ windows: object, endpoint: string }>}
  */
-export async function queryCodingPlan(provider, key, locale, t) {
+export async function queryCodingPlan(provider, key, locale, t, { baseUrl, signal, onAttempt } = {}) {
   const meta = CODING_PLAN_PROVIDERS[provider]
   if (meta === undefined) throw new Error(t(locale, 'codingPlanUnknown', { provider: String(provider) }))
   // 火山方舟:双凭据 AK/SK + HMAC 签名(非 Bearer),单独校验
@@ -1143,18 +1310,85 @@ export async function queryCodingPlan(provider, key, locale, t) {
     }
     throw parseError ?? lastError ?? new Error(t(locale, 'codingPlanNoUsage', { provider: meta.label }))
   }
+  // 小米 MiMo Token Plan:控制台 Cookie 鉴权(非 Bearer)。用量窗口为主,套餐详情
+  // (重置时刻)与余额为尽力而为的增强行——失败不阻塞主窗口。
+  if (provider === 'mimo') {
+    const cookie = normalizeMimoCookie(key)
+    if (cookie === null) {
+      const missing = key === null || typeof key !== 'string' || key.trim().length === 0
+      const error = new Error(t(locale, missing ? 'mimoCookieMissing' : 'mimoCookieInvalid', { provider: meta.label }))
+      error.soft = true
+      throw error
+    }
+    const headers = {
+      cookie,
+      accept: 'application/json',
+      'user-agent': 'dsh-cost-meter/1.7 (DeepSeek Harness plugin)',
+    }
+    /** 单端点抓取:登录态过期(401/403 或业务信封 code=401)报专属文案,其余非 200 报 HTTP 文案。 */
+    const readJson = async url => {
+      signal?.throwIfAborted()
+      const response = await fetchWithRetry(url, { headers, redirect: 'manual', signal }, { timeoutMs: 15000, attempts: 2 })
+      if ((response.status >= 300 && response.status < 400) || response.status === 401 || response.status === 403) {
+        try { await response.body?.cancel?.() } catch {}
+        const error = new Error(t(locale, 'mimoLoginExpired', { provider: meta.label }))
+        error.soft = true
+        throw error
+      }
+      if (!response.ok) {
+        try { await response.body?.cancel?.() } catch {}
+        throw new Error(t(locale, 'codingPlanHttp', { provider: meta.label, code: String(response.status), url }))
+      }
+      const body = await readJsonBounded(response)
+      signal?.throwIfAborted()
+      if (body !== null && typeof body === 'object' && body.code !== undefined && String(body.code) !== '0') {
+        if (['401', '403'].includes(String(body.code))) {
+          const error = new Error(t(locale, 'mimoLoginExpired', { provider: meta.label }))
+          error.soft = true
+          throw error
+        }
+        throw new Error(t(locale, 'codingPlanHttp', { provider: meta.label, code: String(body.code), url }))
+      }
+      return body
+    }
+    const windows = parseMimoTokenPlanUsage(await readJson(MIMO_ENDPOINTS.usage))
+    if (windows === null) throw new Error(t(locale, 'codingPlanNoUsage', { provider: meta.label }))
+    // 套餐详情:周期截止 = 套餐积分窗口的重置时刻(失败忽略,保留无重置窗口)。
+    try {
+      const detail = parseMimoTokenPlanDetail(await readJson(MIMO_ENDPOINTS.detail))
+      if (detail !== null && detail.resetsAt.length > 0 && windows.plan !== undefined) windows.plan.resetsAt = detail.resetsAt
+    } catch { signal?.throwIfAborted() }
+    // 余额行:按币种符号输出文本窗口(与 Kimi/SiliconFlow 余额同形态;失败忽略)。
+    try {
+      const win = textWindowOf(parseMimoBalance(await readJson(MIMO_ENDPOINTS.balance)))
+      if (win !== null) windows.balance = win
+    } catch { signal?.throwIfAborted() }
+    return { windows, endpoint: MIMO_ENDPOINTS.usage }
+  }
   if (key === null || typeof key !== 'string' || key.trim().length === 0) {
     const error = new Error(t(locale, 'codingPlanKeyMissing', { provider: meta.label }))
     error.soft = true
     throw error
   }
-  const urls = CODING_PLAN_ENDPOINTS[provider]
+  const urls = provider === 'minimax' ? miniMaxEndpoints(baseUrl) : CODING_PLAN_ENDPOINTS[provider]
+  const attempts = []
+  const trace = (url, status, stage, code) => {
+    if (provider !== 'zai') return
+    const endpoint = new URL(url)
+    const attempt = { url: endpoint.origin + endpoint.pathname, status, stage, code }
+    attempts.push(attempt)
+    // Diagnostics contain only fixed endpoint paths/status/categories, never
+    // headers, credentials, response bodies or an upstream exception message.
+    try { onAttempt?.({ ...attempt }) } catch { /* Logging cannot change query results. */ }
+  }
+  const release = async response => { try { await response.body?.cancel?.() } catch {} }
   let lastError = null
   // 200 但解析失败的「结构化错误」(业务信封 / 结构已变):比后续端点的 404 等传输层
   // 错误更有诊断价值,单独保留且最终优先抛出——否则最后端点的 404 会盖住 monitor
   // 端点解析失败的真实原因(issue #44 的误导性报错即由此而来)。
   let parseError = null
   for (const url of urls) {
+    signal?.throwIfAborted()
     // kimi 双端点形态(issue #53):api.kimi.com 为订阅配额(专用 UA + 解析器),
     // api.moonshot.cn 为 PAYG 余额;订阅端点 401 视为「无订阅 Key」继续降级尝试。
     let isKimiCoding = false
@@ -1178,12 +1412,23 @@ export async function queryCodingPlan(provider, key, locale, t) {
       }
       // 瞬时网络错误先在单端点上重试(issue #28 同一封装;attempts=2 控制多端点
       // 回退链的最坏串行耗时),仍失败再换端点变体。
-      response = await fetchWithRetry(url, { headers }, { timeoutMs: 15000, attempts: 2 })
+      response = await fetchWithRetry(url, { headers, signal,
+        ...(provider === 'minimax' ? { redirect: 'error' } : provider === 'zai' ? { redirect: 'manual' } : {}),
+      }, { timeoutMs: 15000, attempts: 2 })
     } catch (error) {
+      signal?.throwIfAborted()
+      const code = error?.cause?.code ?? error?.code
+      const known = ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH',
+        'ENETUNREACH', 'EPIPE', 'UND_ERR_SOCKET', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT',
+        'UND_ERR_BODY_TIMEOUT', 'CERT_HAS_EXPIRED', 'DEPTH_ZERO_SELF_SIGNED_CERT', 'SELF_SIGNED_CERT_IN_CHAIN',
+        'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'ERR_TLS_CERT_ALTNAME_INVALID']
+      trace(url, null, 'network', error?.name === 'TimeoutError' ? 'TIMEOUT' : known.includes(code) ? code : 'NETWORK_ERROR')
       lastError = error
       continue // 网络错误:尝试下一个端点变体
     }
     if (response.status === 401 || response.status === 403) {
+      trace(url, response.status, 'http', 'UNAUTHORIZED')
+      await release(response)
       const error = new Error(t(locale, 'codingPlanUnauthorized', { provider: meta.label, code: String(response.status) }))
       error.soft = true // Key 无效/无订阅属预期场景,面板中性提示
       // zai 国内(bigmodel.cn)/国际(z.ai)域名 Key 不互通:单域 401 只说明 Key
@@ -1195,20 +1440,35 @@ export async function queryCodingPlan(provider, key, locale, t) {
       throw error
     }
     if (!response.ok) {
+      trace(url, response.status, 'http', 'HTTP_ERROR')
+      await release(response)
       // 带上实际请求 URL:404 往往是端点变更信号,便于定位(issue #17)。
       lastError = new Error(t(locale, 'codingPlanHttp', { provider: meta.label, code: String(response.status), url }))
       continue
     }
     let data
-    try { data = await response.json() } catch { data = null }
+    try { data = provider === 'minimax' || provider === 'zai' ? await readJsonBounded(response) : await response.json() }
+    catch (error) {
+      signal?.throwIfAborted()
+      trace(url, response.status, 'json', error?.code === 'RESPONSE_TOO_LARGE' ? 'RESPONSE_TOO_LARGE' : 'INVALID_JSON')
+      const failure = new Error(t(locale, 'codingPlanInvalidJson', { provider: meta.label, url }))
+      parseError ??= failure
+      lastError = failure
+      continue
+    }
     if (data === null || typeof data !== 'object') {
+      trace(url, response.status, 'json', 'INVALID_JSON')
       // 200 但响应体非 JSON(如网关/CDN 的 HTML 拦截页):视为当前端点失败,
       // 继续尝试下一端点,不让 SyntaxError 中断整条多端点回退链。
       lastError = new Error(t(locale, 'codingPlanHttp', { provider: meta.label, code: String(response.status), url }))
+      parseError ??= lastError
       continue
     }
     const windows = parse(data)
     if (windows === null) {
+      const apiCode = typeof data.code === 'number' && Number.isSafeInteger(data.code) && ![0, 200].includes(data.code)
+        ? `API_CODE_${data.code}` : 'NO_USAGE'
+      trace(url, response.status, 'usage', apiCode)
       // 200 但业务失败(如 Z.ai 的错误信封 {code:1001,msg:...}):透出服务端 msg,避免误报「接口结构已变」。
       const envelope = data !== null && typeof data === 'object' && typeof data.code === 'number' && data.code !== 0
         && typeof (data.msg ?? data.message) === 'string' ? (data.msg ?? data.message) : null
@@ -1219,7 +1479,17 @@ export async function queryCodingPlan(provider, key, locale, t) {
       lastError = error
       continue
     }
+    trace(url, response.status, 'ok', 'OK')
     return { windows, endpoint: url }
+  }
+  if (provider === 'zai' && attempts.length > 0) {
+    const error = new Error(`${t(locale, 'codingPlanCandidatesFailed', { provider: meta.label })}: `
+      + attempts.map(a => `${a.url} → ${a.status === null ? '' : `HTTP ${a.status} / `}${a.code}`).join('; '))
+    error.code = 'QUOTA_CANDIDATES_FAILED'
+    error.attempts = attempts
+    const active = attempts.filter(a => a.status !== 404)
+    error.soft = active.length > 0 && active.every(a => a.status === 401 || a.status === 403)
+    throw error
   }
   throw parseError ?? lastError ?? new Error(t(locale, 'codingPlanNoUsage', { provider: meta.label }))
 }

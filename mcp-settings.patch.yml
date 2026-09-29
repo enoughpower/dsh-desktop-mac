@@ -1,9 +1,0 @@
-# Desktop-app overlay: register the MCP-settings manager plugin.
-#
-# `setting-mcp` mounts a typert `ctx.mcp` service (auto-registered by
-# dsh-typert-loader) that projects/reconciles @deepseek-ai/dsh-mcp-client
-# loader entries, plus a "MCP 服务" settings section for viewing, editing,
-# removing, and enabling/disabling MCP servers with hot reload on save.
-- insert:
-    - id: setting-mcp
-      name: '@opendsh/dsh-plugin-setting-mcp'

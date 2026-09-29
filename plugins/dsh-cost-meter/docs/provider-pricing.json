@@ -1,9 +1,26 @@
 {
-  "generatedAt": "2026-09-01",
+  "generatedAt": "2026-09-28",
   "note": "Auto-generated from lib/pricing.js DEFAULT_PROVIDER_PRICE_TABLE. USD per 1M tokens; unpriced entries have no verified official price.",
   "providers": {
     "openai": {
       "models": {
+        "gpt-6-astra": {
+          "input": 10,
+          "cachedInput": 1,
+          "cacheWrite": 12.5,
+          "output": 50,
+          "longContext": {
+            "aboveInputTokens": 272000,
+            "cacheMiss": 20,
+            "cacheHit": 2,
+            "cacheWrite": 25,
+            "output": 75
+          },
+          "billingMode": "flat",
+          "sourceUrl": "https://developers.openai.com/api/docs/models/gpt-6-astra",
+          "checkedAt": "2026-09-11",
+          "notes": "标准 API 价，OpenCode Zen 同价；完整输入（含缓存读写）超过 272K 时整次请求按长上下文档计费；不含 Batch/Flex/Fast 服务档折扣或倍率"
+        },
         "gpt-5.6-sol": {
           "input": 2,
           "cachedInput": 0.2,
@@ -591,13 +608,56 @@
     },
     "xiaomi": {
       "models": {
+        "mimo-v2.6-pro": {
+          "input": 0.435,
+          "cachedInput": 0.0036,
+          "output": 0.87,
+          "cny": {
+            "cacheHit": 0.025,
+            "cacheMiss": 3,
+            "output": 6
+          },
+          "billingMode": "flat",
+          "sourceUrl": "https://mimo.mi.com/docs/zh-CN/price/pay-as-you-go",
+          "checkedAt": "2026-09-28",
+          "notes": "批量推理按半价"
+        },
+        "mimo-v2.6-flash": {
+          "input": 0.14,
+          "cachedInput": 0.0028,
+          "output": 0.28,
+          "cny": {
+            "cacheHit": 0.02,
+            "cacheMiss": 1,
+            "output": 2
+          },
+          "billingMode": "flat",
+          "sourceUrl": "https://mimo.mi.com/docs/zh-CN/price/pay-as-you-go",
+          "checkedAt": "2026-09-28",
+          "notes": "批量推理按半价"
+        },
+        "mimo-v2.6-pro-ultraspeed": {
+          "input": 4.35,
+          "cachedInput": 0.036,
+          "output": 8.7,
+          "cny": {
+            "cacheHit": 0.25,
+            "cacheMiss": 30,
+            "output": 60
+          },
+          "billingMode": "flat",
+          "sourceUrl": "https://mimo.mi.com/docs/zh-CN/price/pay-as-you-go",
+          "checkedAt": "2026-09-28",
+          "notes": "速度优先档;官方未提供批量推理档"
+        },
         "mimo-v2.5": {
           "input": 0.14,
           "cachedInput": 0.0028,
           "output": 0.28,
           "billingMode": "flat",
           "sourceUrl": "https://opencode.ai/docs/go",
-          "checkedAt": "2026-08-17"
+          "checkedAt": "2026-08-17",
+          "notes": "官方标注即将下线,由 mimo-v2.6-flash 接替"
         },
         "mimo-v2.5-pro": {
           "input": 0.435,
@@ -605,7 +665,8 @@
           "output": 0.87,
           "billingMode": "flat",
           "sourceUrl": "https://opencode.ai/docs/go",
-          "checkedAt": "2026-08-17"
+          "checkedAt": "2026-08-17",
+          "notes": "官方标注即将下线,由 mimo-v2.6-pro 接替"
         }
       }
     },
@@ -756,6 +817,22 @@
           "sourceUrl": "https://opencode.ai/docs/go",
           "checkedAt": "2026-08-17"
         },
+        "mimo-v2.6-flash": {
+          "input": 0.14,
+          "cachedInput": 0.0028,
+          "output": 0.28,
+          "billingMode": "flat",
+          "sourceUrl": "https://opencode.ai/docs/go",
+          "checkedAt": "2026-09-28"
+        },
+        "mimo-v2.6-pro": {
+          "input": 0.435,
+          "cachedInput": 0.003625,
+          "output": 0.87,
+          "billingMode": "flat",
+          "sourceUrl": "https://opencode.ai/docs/go",
+          "checkedAt": "2026-09-28"
+        },
         "mimo-v2.5": {
           "input": 0.14,
           "cachedInput": 0.0028,
@@ -844,6 +921,44 @@
           "sourceUrl": "https://opencode.ai/docs/go",
           "checkedAt": "2026-08-25",
           "notes": "低价换取提示词/补全用于训练 Meta 模型;限地区"
+        }
+      }
+    },
+    "openrouter": {
+      "models": {
+        "meta/muse-spark-1.3-contributor": {
+          "input": 0.1,
+          "cachedInput": 0.002,
+          "output": 0.2,
+          "billingMode": "flat",
+          "sourceUrl": "https://openrouter.ai/api/v1/models",
+          "checkedAt": "2026-09-17"
+        },
+        "google/gemini-3.8-flash": {
+          "input": 0.75,
+          "cachedInput": 0.075,
+          "cacheWrite": 0.041667,
+          "output": 3.75,
+          "billingMode": "flat",
+          "sourceUrl": "https://openrouter.ai/api/v1/models",
+          "checkedAt": "2026-09-17"
+        },
+        "qwen/qwen3.8-flash": {
+          "input": 0.15,
+          "cachedInput": 0.016,
+          "cacheWrite": 0.2,
+          "output": 0.47,
+          "billingMode": "flat",
+          "sourceUrl": "https://openrouter.ai/api/v1/models",
+          "checkedAt": "2026-09-17"
+        },
+        "z-ai/glm-5.3-flash": {
+          "input": 0.09,
+          "cachedInput": 0.018,
+          "output": 0.3,
+          "billingMode": "flat",
+          "sourceUrl": "https://openrouter.ai/api/v1/models",
+          "checkedAt": "2026-09-17"
         }
       }
     }

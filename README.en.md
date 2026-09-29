@@ -58,11 +58,7 @@ desktop/
 ├── add-plugin.sh           # one-click bundled plugin install / --runtime user-level install
 ├── prune.patch.yml         # disables pruned plugin rows (llm-pi-ai, telemetry)
 ├── billing.patch.yml       # registers the cost plugin dsh-cost-meter
-├── pocket.patch.yml        # registers the phone-access plugin dsh-pocket
 ├── updater.patch.yml       # registers the version/update-check plugin
-├── skills-hub.patch.yml   # registers the global skills library plugin dsh-skills
-├── mcp-settings.patch.yml  # registers the MCP service management plugin
-├── vision.patch.yml        # registers the vision plugin dsh-vision-router v2.1.5 (not taking over llm-deepseek)
 ├── theme-blackgold.patch.yml # registers the black-gold theme plugin (@frostgao/dsh-theme-blackgold)
 ├── prune.sh                # node_modules slimming script
 ├── build.sh                # one-click build
@@ -74,14 +70,16 @@ desktop/
 
 | Version | Build command | App bundle | Backend | DMG | Notes |
 |---|---|---|---|---|---|
-| **Full** | `./build.sh --dmg` | 240M | 235M | ~79 MB | Includes 30+ providers (Pi.ai / Anthropic / Google / OpenAI…; llm-pi-ai lazily loaded) |
-| **Slim (lite)** | `KEEP_EXTRA_PROVIDERS=0 ./build.sh --dmg` | 203M | 200M | ~73 MB | DeepSeek only; multi-provider SDKs & telemetry removed |
+| **Full** | `./build.sh --dmg` | 451M | 446M | ~176 MB | 30+ providers (llm-pi-ai lazily loaded) plus the 0.2.0 document-preview runtime (`libreoffice-kit`, ~200M) and speech runtime (`sherpa-onnx`, ~33M) |
+| **Slim (lite)** | `KEEP_EXTRA_PROVIDERS=0 ./build.sh --dmg` | 417M | 414M | ~160 MB | DeepSeek only; multi-provider SDKs & telemetry removed; document-preview / speech runtimes kept |
 
-The ~37M saved by the slim build mostly comes from removing the Pi.ai multi-provider SDK stack
+The ~34M saved by the slim build mostly comes from removing the Pi.ai multi-provider SDK stack
 (`@earendil-works/pi-ai` and its `@mistralai`/`@google`/`@anthropic-ai`/`@aws-sdk`/`@opentelemetry`/`openai`
 deps), session telemetry, non-darwin-arm64 native binaries, and non-runtime files
-(`.ts`/`.d.ts`/`.map`/third-party docs), plus stripping Node debug symbols (`strip -x`). Both reuse
-the system WKWebView (no Chromium), far smaller than an Electron build.
+(`.ts`/`.d.ts`/`.map`/third-party docs), plus stripping Node debug symbols (`strip -x`). Since 0.2.0 the
+bundle is dominated by the **document-preview runtime** (`libreoffice-kit-darwin-arm64`, ~200M) and the
+**speech runtime** (`sherpa-onnx-darwin-arm64`, ~33M), neither of which the slim build removes, so lite and
+full now differ very little. Both reuse the system WKWebView (no Chromium), far smaller than an Electron build.
 
 > After a full build, Settings → Models → **Add Provider** enables amazon-bedrock / anthropic / google /
 > google-vertex / mistral / openai / openrouter / xai / groq / nvidia and 30+ more (the llm-pi-ai plugin
@@ -94,13 +92,13 @@ with the desktop in use vs. the web version opened in a browser (Chrome tabs cle
 
 | | Desktop client | Web version (in browser) |
 |---|---|---|
-| Server | backend node 160 MB | fresh web node 177 MB |
-| Rendering | WKWebView shell 98 MB (built-in) | browser (Chrome) ~1150 MB |
-| **Total** | **~258 MB** | **~1.33 GB** |
+| Server | backend node 187 MB | fresh web node 177 MB |
+| Rendering | WKWebView shell 90 MB (built-in) | browser (Chrome) ~1150 MB |
+| **Total** | **~277 MB** | **~1.33 GB** |
 
 **Conclusion**: the desktop app is roughly **1/5** of the web version's total, saving about **1 GB** of RAM.
 Even with all Chrome tabs cleared, the browser carries ~1150 MB of **base overhead** (browser / GPU /
-network / extensions), while the desktop folds that "rendering" into a 98 MB WKWebView shell and ships the
+network / extensions), while the desktop folds that "rendering" into a 90 MB WKWebView shell and ships the
 backend together as **one app**, eliminating the need to run a separate browser. **Slim install + slim memory,
 a win-win.**
 
@@ -128,7 +126,7 @@ The backend listens only on a random `127.0.0.1` port, avoiding conflicts and LA
 ## Version & Update Check
 
 The app shows the current DeepSeek Harness version in the **top-right corner** (the `@deepseek-ai/dsh`
-package version, e.g. `v0.1.5-rc.2`). Under **Settings → Check for Updates**:
+package version, e.g. `v0.2.0-rc.1`). Under **Settings → Check for Updates**:
 
 - **Check for updates**: compares against the latest `@deepseek-ai/dsh` on the npm registry;
 - **Update now**: downloads the latest closure (dsh + all its `@deepseek-ai/*` deps, plus any new
@@ -153,7 +151,7 @@ To **permanently upgrade** (so `./build.sh` keeps producing the new version):
 
 ```bash
 cd desktop
-# 1) bump @deepseek-ai/dsh in package.json to the target version (e.g. 0.1.5-rc.2)
+# 1) bump @deepseek-ai/dsh in package.json to the target version (e.g. 0.2.0-rc.1)
 # 2) reinstall deps with a working node/npm (system node may be broken by an icu4c change; use nvm's node)
 $HOME/.nvm/versions/node/v22.19.0/bin/npm install --omit=dev --no-audit --no-fund
 # 3) rebuild
@@ -162,62 +160,6 @@ $HOME/.nvm/versions/node/v22.19.0/bin/npm install --omit=dev --no-audit --no-fun
 
 The `@deepseek-ai/dsh` version in the produced app = the version in `desktop/node_modules`, i.e. what
 `package.json` declares.
-
-## Vision (dsh-vision-router)
-
-Bundled third-party plugin **dsh-vision-router** (see its
-[GitHub repo](https://github.com/ysr666/dsh-vision-router), bundled at **v2.1.5**), giving text-only models
-(DeepSeek etc.) **pixel-faithful image understanding**:
-
-- **See the original image** (no lossy description bridge): image turns are handed to a vision model,
-  DeepSeek always does the reasoning; an image turn is just a normal **tool call** that could iterate
-  (`vision_ground` → `vision_crop` → `vision_describe` → `vision_pixel_diff`…) — locatable, verifiable.
-- **Free by default**: vision tools fall back to 5 OVHcloud anonymous vision models, no key needed
-  (2 req/min per IP per model); your own vision models (Zhipu/Bailian/OpenRouter…) take priority.
-- **14 in-depth tools**: Q&A / locate / crop / pixel-diff / colors / OCR / SVG trace / cutout /
-  HTML screenshot / long-screenshot read, etc.; no Python — based on sharp / potrace / tesseract / system Chrome.
-- **Settings**: Settings → Plugins → Plugin config → **"Vision Router"** card; whether it takes over the
-  official route is set by the "Stealth mode" toggle (off by default, official `llm-deepseek` row stays).
-- **No log pollution**: the rewrite toward vision tools happens only at the model input layer; the session
-  log still shows the original image.
-
-| File | Role |
-|---|---|
-| `plugins/dsh-vision-router/` | plugin source (v2.1.5: host route + 14 vision tools + browser settings card) |
-| `vision.patch.yml` | registers the plugin + relaxed attachment policy (20 MiB / 100 MP / 10000 px per edge; not taking over llm-deepseek) |
-
-## Global Skills Library (dsh-skills)
-
-Bundled third-party plugin **dsh-skills** ([CocoSgt/dsh-skills](https://github.com/CocoSgt/dsh-skills)).
-Centralizes scattered skills: Claude Code's `~/.claude/skills`, project dirs, `.skill` packages, etc.,
-imported into `$DSH_HOME/skills` (the official skill-filesystem default scan root, live watcher); imported
-skills appear in the input's "/" slash menu; Settings has a "Skills" nav page.
-
-Features:
-
-- **Two import identities**: reference (symlink, edits edit the source) / copy (full tree, evolves independently).
-- **Global skills tab**: + new skill, upload `.skill`, visual filter; each card shows identity badge,
-  resource file count, non-default invocation policy; "Edit SKILL.md" inline editing, export `.skill`
-  full-tree package, open dir, delete (reference only removes the link, two-step confirm).
-- **Discover tab**: scan directory chips in place, then "reference / copy" the results; supports "reference all" batch.
-- All copy rendered via the official locale service (Chinese/English); pairs with `dsh-attachments` / `dsh-inspector`.
-
-| File | Role |
-|---|---|
-| `plugins/dsh-skills/` | plugin source (host: `skillHub` Typert gateway: status / import (reference|copy) / edit / export; browser: Settings skills hub) |
-| `skills-hub.patch.yml` | registers the plugin (via `--patch`) |
-
-## MCP Service Management
-
-Bundled third-party plugin **@opendsh/dsh-plugin-setting-mcp** (npm) adds a "**MCP Services**" entry in
-Settings to **view, add, edit, remove, enable/disable** MCP services (stdio / Streamable HTTP); clicking
-"Save" hot-applies (no restart). It manages the `@deepseek-ai/dsh-mcp-client` loader entries and persists
-the service set back to the profile's `cordis.patch.yml`.
-
-| File | Role |
-|---|---|
-| `plugins/@opendsh/dsh-plugin-setting-mcp/` | plugin source (host: typert `ctx.mcp` service; browser: Settings MCP service management) |
-| `mcp-settings.patch.yml` | registers the plugin (via `--patch`) |
 
 ## User Plugins (Plan C: runtime install, no recompile)
 
@@ -241,7 +183,7 @@ via `DSH_HOME`). This mechanism is built into the app:
 > `--runtime add` passes `-w` (the profile is a pnpm workspace root; pnpm needs it).
 > `remove`/`list` use the full package name (e.g. `@scope/name`); trust `list` output.
 >
-> **Both plugin kinds work**: bundle plugins (e.g. updater, setting-mcp) auto-join the bundle layer after install;
+> **Both plugin kinds work**: bundle plugins (e.g. updater, cost-meter) auto-join the bundle layer after install;
 > browser-only plugins that only declare `dsh.client` (e.g. `@frostgao` themes) are NOT auto-activated by
 > `dsh plugin add` — `plugins.mjs` appends an activation row to the profile's user-layer
 > `cordis.patch.yml` and cleans it on remove.
@@ -258,7 +200,7 @@ Bundled `@frostgao/dsh-theme-blackgold` (a companion theme by @frostgao), shippe
 - Pure presentation-layer override (via `dsh-client-ui-theme` token overrides), respects `prefers-reduced-motion`.
 
 The plugin is client-only (`immediately: true`, no toggle needed); loaded at start with the plugin manifest.
-Pure ESM, no native binary; its `@deepseek-ai/dsh-client-ui-theme` dep ships with 0.1.5-rc.2.
+Pure ESM, no native binary; its `@deepseek-ai/dsh-client-ui-theme` dep ships with 0.2.0-rc.1.
 
 | File | Role |
 |---|---|
@@ -268,7 +210,7 @@ Pure ESM, no native binary; its `@deepseek-ai/dsh-client-ui-theme` dep ships wit
 ## Session Cost Meter (dsh-cost-meter)
 
 Bundled **dsh-cost-meter** ([Han-1413141/dsh-cost-meter](https://github.com/Han-1413141/dsh-cost-meter),
-v1.7.20), providing session-level cost stats:
+v1.7.45), providing session-level cost stats:
 
 - **Cost**: per-conversation cost, daily totals, history; built-in 90+ model price catalog auto-matches,
   one-click sync with official prices.
@@ -284,41 +226,6 @@ v1.7.20), providing session-level cost stats:
 | `plugins/dsh-cost-meter/` | plugin source (host: costMeter service + ledger; browser: cost display & settings) |
 | `billing.patch.yml` | registers the plugin (via `--patch`; the `name:` must be quoted — linkBundledPlugins only collects quoted names) |
 
-
-## Phone Access (dsh-pocket)
-
-Bundled **dsh-pocket** ([shaobeichen/dsh-pocket](https://github.com/shaobeichen/dsh-pocket),
-v2.10.6, GPL-2.0) puts DSH "in your pocket" — **scan a QR code with your phone and see the
-same interface in real time**:
-
-- **LAN QR code**: Settings → **Phone Access** — phones on the same Wi-Fi scan to open
-  (auto-detects the LAN IP; a separate 8-digit PIN, enabled by default, can be disabled or
-  customized).
-- **Public QR code**: click "Enable public access" → cloudflared quick tunnel (downloaded on
-  first use) → public QR code for use anywhere (4G / any network); the public link has its own
-  8-digit PIN (rotated on every enable by default, customizable).
-- **Real-time mirror**: the phone shows the same dsh web UI as the computer — WebSocket
-  pass-through, two-way control, narrow screens switch to a mobile drawer layout; heartbeat
-  keep-alive with auto-reconnect, gzip/brotli response compression.
-- **Desktop adaptation**: the desktop app injects `dsh-desktop-mode=compatibility`, so the
-  QR mirror works out of the box; the plugin's in-page "update / restart" actions are disabled
-  in the desktop build (managed by the app). If port 3081 is taken the proxy auto-switches.
-
-
-| File | Role |
-|---|---|
-| `plugins/dsh-pocket/` | plugin source (host: Host/Origin-rewriting reverse proxy + QR codes + tunnel; browser: Settings → Phone Access + mobile adaptation) |
-| `pocket.patch.yml` | registers the plugin (via `--patch`; quoted `name:` so linkBundledPlugins links it into the profile) |
-
-> ⚠️ **Security**: DSH can execute code on your computer. Both the LAN and public links are
-> gated by a separate 8-digit PIN — don't share QR codes / URLs / PINs with others; a security
-> disclaimer is enforced before enabling public access; close it when done.
-> The login session is bound to the computer's dsh web process — after the app restarts or
-> updates, the phone must re-enter the PIN once.
-
-
-The launcher also prepends the backend dir (with the bundled `node` binary) to PATH, so vision subprocesses
-use the app's own Node rather than a possibly-broken system Node.
 
 ## License
 

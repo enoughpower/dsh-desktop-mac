@@ -59,12 +59,16 @@ export function createUsageDeduper({ windowMs = USAGE_DEDUP_WINDOW_MS, now = Dat
     }
   }
 
-  // 会话条目懒裁剪:条目在窗口内必然被访问到(有活跃指纹),把窗口外彻底
-  // 空掉的条目删除即可让 Map 收敛到活跃会话量级。超过阈值才扫描一次,
-  // 摊薄每次入账的开销。
-  const pruneIfNeeded = () => {
+  // 不再访问的会话也要清理过期指纹。登记本次调用后再裁剪，避免把尚未
+  // 写入指纹的新会话当作空条目删除，使超过阈值后的转发对重复入账。
+  let nextPruneAt = 0
+  const pruneIfNeeded = t => {
     if (sessions.size <= 1024) return
+    if (t < nextPruneAt) return
+    nextPruneAt = t + windowMs
     for (const [key, entry] of sessions) {
+      sweep(entry.plain, t)
+      sweep(entry.remapped, t)
       if (entry.plain.size === 0 && entry.remapped.size === 0) sessions.delete(key)
     }
   }
@@ -94,13 +98,13 @@ export function createUsageDeduper({ windowMs = USAGE_DEDUP_WINDOW_MS, now = Dat
       }
       sweep(entry.plain, t)
       sweep(entry.remapped, t)
-      pruneIfNeeded()
       const book = wrapped ? entry.remapped : entry.plain
       // 包装样本与普通样本、改挂样本都互斥;普通样本只与改挂样本互斥。
       if (wrapped ? (entry.plain.has(fp) || entry.remapped.has(fp)) : entry.remapped.has(fp)) {
         return null
       }
       book.set(fp, t)
+      pruneIfNeeded(t)
       if (book.size > maxEntries) {
         // 容量护栏:淘汰最旧条目(窗口语义只关心最近的转发对)。
         let oldestFp = null

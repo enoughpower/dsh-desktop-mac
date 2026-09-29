@@ -20,10 +20,10 @@
  * 全部为纯函数(可单测);持久化与网络在宿主侧(store.js / index.js)。
  */
 
-import { CODING_PLAN_PROVIDER_IDS, QWEN_TOKEN_PLAN_PROVIDER_IDS, SCNET_TOKEN_PLAN_PROVIDER_IDS } from './coding-plans.js'
+import { CODING_PLAN_PROVIDER_IDS, QWEN_TOKEN_PLAN_PROVIDER_IDS, SCNET_TOKEN_PLAN_PROVIDER_IDS, MIMO_TOKEN_PLAN_PROVIDER_IDS } from './coding-plans.js'
 import { canonModelId } from './pricing.js'
 
-/** Plan 统计支持的提供商 id:9 家 Coding Plan + OpenCode Go。 */
+/** Plan 统计支持的提供商 id:11 家 Coding Plan + OpenCode Go。 */
 export const PLAN_PROVIDER_IDS = [...CODING_PLAN_PROVIDER_IDS, 'go']
 
 /** 请求 provider 名 → Plan 提供商 id 的别名归并(路由渠道 zen/opencode 都是 Go)。 */
@@ -31,6 +31,7 @@ export const PLAN_PROVIDER_ALIASES = {
   go: ['go', 'zen', 'opencode', 'opencode-go'],
   qwen: QWEN_TOKEN_PLAN_PROVIDER_IDS,
   scnet: SCNET_TOKEN_PLAN_PROVIDER_IDS,
+  mimo: MIMO_TOKEN_PLAN_PROVIDER_IDS,
 }
 
 /** 各 Plan 提供商的默认计费类别(auto = 跟随该家启用开关)。 */
@@ -45,6 +46,7 @@ export const DEFAULT_PLAN_PROVIDER_CLASS = {
   scnet: 'auto',
   volcengine: 'auto',
   qwen: 'auto',
+  mimo: 'auto',
   go: 'auto',
 }
 
@@ -121,14 +123,16 @@ export function isRoutedThirdPartyCall(provider, modelId, prices) {
 export function billingClassOf(provider, modelId, planBilling, enabledPlans, prices) {
   let planId = planProviderIdOf(provider)
   if (planId === null && isRoutedThirdPartyCall(provider, modelId, prices)) planId = 'go'
-  if (planId === null) return 'api'
   const models = planBilling?.models
   if (models !== null && typeof models === 'object') {
     const direct = models[`${provider}:${modelId}`]
     if (direct === 'plan' || direct === 'api') return direct
-    const canonical = models[`${planId}:${modelId}`]
-    if (canonical === 'plan' || canonical === 'api') return canonical
+    if (planId !== null) {
+      const canonical = models[`${planId}:${modelId}`]
+      if (canonical === 'plan' || canonical === 'api') return canonical
+    }
   }
+  if (planId === null) return 'api'
   const providers = planBilling?.providers
   const configured = providers !== null && typeof providers === 'object' ? providers[planId] : undefined
   if (configured === 'plan' || configured === 'api') return configured
@@ -157,7 +161,7 @@ export function canonicalWindowKey(name) {
   if (n.length === 0) return 'unknown'
   if (/5\s*h|five|rolling/.test(n)) return 'fiveHour'
   if (/week|seven_?day|7\s*d/.test(n)) return 'weekly'
-  if (/month/.test(n)) return 'monthly'
+  if (/month/.test(n) || n === 'plan') return 'monthly' // MiMo monthUsage 的套餐窗口。
   if (/daily|^day$/.test(n)) return 'daily'
   // 滚动窗命名(duration+timeUnit,Kimi limits[] 的 '5h'/'1w'/'2d'/'1mo'):
   // 按时间量级归入最近标准周期,避免落进 periodStartOf 的 48h 兜底——满窗
@@ -379,6 +383,8 @@ export function recordSamples(samples, providerId, windows, localAggOf, nowMs) {
   const current = byProvider[providerId] !== null && typeof byProvider[providerId] === 'object' ? byProvider[providerId] : {}
   const next = { ...byProvider, [providerId]: { ...current } }
   for (const [name, win] of Object.entries(windows ?? {})) {
+    // MiMo 补偿积分无独立本地归属，不能拿全部调用去估算该积分池。
+    if (providerId === 'mimo' && name !== 'plan') continue
     if (win === null || typeof win !== 'object') continue
     const percent = Number(win.percent)
     if (!Number.isFinite(percent) || percent < 0) continue
@@ -535,6 +541,7 @@ export function buildPlanStats({ days, hourBuckets, samples, codingPlans, goQuot
     const wins = {}
     const intervalsByWindow = {}
     for (const [name, win] of Object.entries(windowsRaw)) {
+      if (providerId === 'mimo' && name !== 'plan') continue
       if (win === null || typeof win !== 'object') continue
       if (!Number.isFinite(Number(win.percent))) continue
       const wk = canonicalWindowKey(name)

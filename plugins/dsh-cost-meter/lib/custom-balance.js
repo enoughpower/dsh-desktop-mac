@@ -9,6 +9,11 @@ import { credentialRef } from '@deepseek-ai/dsh-credentials'
 // 依赖底层,从它导入即断环。
 import { fetchWithRetry, looksLikeSecretHeaderValue, readJsonBounded } from './net.js'
 import { ALIYUN_BALANCE_CREDENTIAL_VARS, queryAliyunBalance } from './aliyun-balance.js'
+// 复用网关层的 loopback 判定(issue #87 v1.7.25+):本机回环端点(如
+// dsh-workbuddy-connect 的 /plugins/.../status)只监听 127.0.0.1,不提供 TLS,
+// 与 gatewayQuotas 同口径放行明文 http;非回环主机仍强制 https。
+// gateway-quotas → gateway-quota-adapters 均不反向依赖本模块,无 ESM 环。
+import { isLoopbackHost } from './gateway-quotas.js'
 
 export const CUSTOM_BALANCE_ADAPTER_ID = 'custom'
 
@@ -143,27 +148,33 @@ const warnedHosts = new Set()
  * @param {import('cordis').Context} ctx
  * @param {Record<string, unknown>} config
  */
-export async function queryCustomBalance(ctx, config) {
+export async function queryCustomBalance(ctx, config, { signal } = {}) {
+  signal?.throwIfAborted()
   const custom = config?.customBalance
   if (custom?.enabled !== true) {
     const error = new Error('custom balance disabled')
     error.soft = true
     throw error
   }
-  if (custom.adapter === 'aliyun') return queryAliyunBalance(ctx, config)
+  if (custom.adapter === 'aliyun') return queryAliyunBalance(ctx, config, { signal })
   const request = custom.request
   if (request === null || typeof request !== 'object' || typeof request.url !== 'string' || request.url.length === 0) {
     throw new Error('customBalance.request.url is required')
   }
   // 端点收紧(v1.6.8):URL 必须是 https。自定义余额请求头支持 {{ENV}} 凭据占位符
   // (解析自 DSH 凭据库或环境变量),明文 http 会把密钥暴露给同网段嗅探。
+  // v1.7.26 起与 gatewayQuotas 同口径放行 **loopback** 明文 http:本机服务
+  // (127.0.0.1 / localhost / [::1]) 流量不出网卡,且大量本机只读路由
+  // (如 dsh-workbuddy-connect 的额度 status 路由)只监听回环、不提供 TLS;
+  // 非回环主机依旧强制 https。
   let parsedUrl
   try {
     parsedUrl = new URL(request.url)
   } catch {
     throw new Error(`customBalance.request.url is not a valid URL: ${request.url}`)
   }
-  if (parsedUrl.protocol !== 'https:') {
+  const loopbackTarget = isLoopbackHost(parsedUrl.hostname)
+  if (parsedUrl.protocol !== 'https:' && !(parsedUrl.protocol === 'http:' && loopbackTarget)) {
     throw new Error(`customBalance.request.url must use https (got ${parsedUrl.protocol}); refusing to send credentials over plaintext`)
   }
   // 凭据外带防护(v1.6.8 → v1.7.6 扩展,issue #86):请求头里**解析出了真实凭据**
@@ -193,10 +204,10 @@ export async function queryCustomBalance(ctx, config) {
   }
   const method = typeof request.method === 'string' ? request.method.toUpperCase() : 'GET'
   const headers = await resolveHeaders(rawHeaders, ctx)
-  const init = { method, headers, redirect: 'manual' }
+  const init = { method, headers, redirect: 'manual', signal }
   if (method !== 'GET' && method !== 'HEAD' && request.body !== undefined) {
     init.body = typeof request.body === 'string' ? request.body : JSON.stringify(request.body)
-    if (!headers['content-type'] && !headers['Content-Type']) {
+    if (!Object.keys(headers).some(name => name.toLowerCase() === 'content-type')) {
       init.headers = { ...headers, 'content-type': 'application/json' }
     }
   }
@@ -205,6 +216,7 @@ export async function queryCustomBalance(ctx, config) {
   // 目标主机,一次跨源重定向就足以把密钥发去别处;遇到重定向直接报错。
   const response = await fetchWithRetry(request.url, init, { timeoutMs: 15000 })
   if (response.status >= 300 && response.status < 400) {
+    try { await response.body?.cancel?.() } catch {}
     throw new Error(`custom balance endpoint redirected (HTTP ${String(response.status)}); redirects are refused to avoid forwarding credentials to another host`)
   }
   if (!response.ok) {

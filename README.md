@@ -55,11 +55,7 @@ desktop/
 ├── add-plugin.sh           # 一键装内置插件 / --runtime 走用户级安装
 ├── prune.patch.yml         # 禁用被裁剪掉的插件行（llm-pi-ai、telemetry）
 ├── billing.patch.yml       # 注册内置费用插件 dsh-cost-meter
-├── pocket.patch.yml        # 注册内置手机访问插件 dsh-pocket
 ├── updater.patch.yml       # 注册内置版本号/检查更新插件
-├── skills-hub.patch.yml   # 注册内置全局技能库插件 dsh-skills
-├── mcp-settings.patch.yml  # 注册内置 MCP 服务管理插件
-├── vision.patch.yml        # 注册识图插件 dsh-vision-router v2.1.5（不接管 llm-deepseek）
 ├── theme-blackgold.patch.yml # 注册黑金主题插件（@frostgao/dsh-theme-blackgold）
 ├── prune.sh                # node_modules 精简脚本
 ├── build.sh                # 一键构建
@@ -71,13 +67,15 @@ desktop/
 
 | 版本 | 构建命令 | App 包 | 内置后端 | DMG 安装包 | 说明 |
 |---|---|---|---|---|---|
-| **完整版 (full)** | `./build.sh --dmg` | 240M | 235M | ~79 MB | 含 Pi.ai / Anthropic / Google / OpenAI 等 30+ 提供方（llm-pi-ai 按需休眠加载） |
-| **精简版 (lite)** | `KEEP_EXTRA_PROVIDERS=0 ./build.sh --dmg` | 203M | 200M | ~73 MB | 仅 DeepSeek，去掉多供应商 SDK 与遥测 |
+| **完整版 (full)** | `./build.sh --dmg` | 451M | 446M | ~176 MB | 含 30+ 提供方（llm-pi-ai 按需休眠加载），以及 0.2.0 的文档预览运行时（`libreoffice-kit` ~200M）与语音运行时（`sherpa-onnx` ~33M） |
+| **精简版 (lite)** | `KEEP_EXTRA_PROVIDERS=0 ./build.sh --dmg` | 417M | 414M | ~160 MB | 仅 DeepSeek，去掉多供应商 SDK 与遥测；文档预览 / 语音运行时保留 |
 
-精简版省的 ~37M 主要来自：删除 Pi.ai 多供应商 SDK 栈（`@earendil-works/pi-ai` 及拖入的
+精简版省的 ~34M 主要来自：删除 Pi.ai 多供应商 SDK 栈（`@earendil-works/pi-ai` 及拖入的
 `@mistralai`/`@google`/`@anthropic-ai`/`@aws-sdk`/`@opentelemetry`/`openai`）、session 遥测、
 非 darwin-arm64 原生二进制、`.ts`/`.d.ts`/`.map`/三方文档等非运行文件，并去掉 Node 调试符号
-（`strip -x`）。两者都复用系统 WKWebView（不打包 Chromium），体积远小于 Electron 方案。
+（`strip -x`）。0.2.0 起应用体积主要由**文档预览运行时**（`libreoffice-kit-darwin-arm64`，~200M）
+与**语音运行时**（`sherpa-onnx-darwin-arm64`，~33M）决定，二者不在精简版裁剪范围内，因此 lite
+与 full 的体积差异已很小。两者都复用系统 WKWebView（不打包 Chromium），体积远小于 Electron 方案。
 
 > 完整版构建后在 设置 → 模型 → **添加提供方** 可启用 amazon-bedrock / anthropic / google /
 > google-vertex / mistral / openai / openrouter / xai / groq / nvidia 等 30+ 提供方
@@ -89,9 +87,9 @@ desktop/
 
 | | 桌面客户端 | Web 版（浏览器访问） |
 |---|---|---|
-| 服务端 | 后端 node 160 MB | 全新 web node 177 MB |
-| 渲染 | WKWebView 壳 98 MB（已内置） | 浏览器（Chrome）约 1150 MB |
-| **合计** | **约 258 MB** | **约 1.33 GB** |
+| 服务端 | 后端 node 187 MB | 全新 web node 177 MB |
+| 渲染 | WKWebView 壳 90 MB（已内置） | 浏览器（Chrome）约 1150 MB |
+| **合计** | **约 277 MB** | **约 1.33 GB** |
 
 **结论**：桌面端约为 Web 版的 **1/5**，省约 **1GB** 内存。即使 Chrome 清空所有标签页，
 浏览器仍有约 1150MB 的**基座开销**（浏览器 / GPU / 网络 / 扩展等进程）——而桌面端把这套
@@ -122,7 +120,7 @@ desktop/
 ## 版本号与检查更新
 
 应用在**窗口右上角**常驻显示当前 DeepSeek Harness 版本号（`@deepseek-ai/dsh` 包版本，
-如 `v0.1.5-rc.2`）。「设置 → 检查更新」里可以：
+如 `v0.2.0-rc.1`）。「设置 → 检查更新」里可以：
 
 - **检查更新**：对比 npm registry 上 `@deepseek-ai/dsh` 的最新版本；
 - **立即更新**：后台下载最新闭包（dsh 及其全部 `@deepseek-ai/*` 依赖，并自动补装新版本
@@ -147,7 +145,7 @@ desktop/
 
 ```bash
 cd desktop
-# 1) 把 package.json 里 @deepseek-ai/dsh 的版本号改成目标版本（如 0.1.5-rc.2）
+# 1) 把 package.json 里 @deepseek-ai/dsh 的版本号改成目标版本（如 0.2.0-rc.1）
 # 2) 用可用的 node/npm 重装依赖（系统 node 可能因 icu4c 损坏，用 nvm 的 node）
 $HOME/.nvm/versions/node/v22.19.0/bin/npm install --omit=dev --no-audit --no-fund
 # 3) 重建
@@ -156,65 +154,6 @@ $HOME/.nvm/versions/node/v22.19.0/bin/npm install --omit=dev --no-audit --no-fun
 
 `./build.sh` 产出应用包的 `@deepseek-ai/dsh` 版本 = `desktop/node_modules` 里的版本，
 所以以 `package.json` 声明的版本为准。
-
-## 识图（dsh-vision-router）
-
-内置第三方插件 **dsh-vision-router**（见其
-[GitHub 仓库](https://github.com/ysr666/dsh-vision-router)，内置 **v2.1.5**），
-给纯文本模型（DeepSeek 等）提供**像素保真的图片理解**：
-
-- **原图直看**：图片轮交给视觉模型看原图，DeepSeek 始终负责思考；图片轮就像普通
-  **工具调用**（`vision_ground` → `vision_crop` → `vision_describe` → `vision_pixel_diff`
-  … 可连续多步迭代定位/裁剪/比对/修复），可定位、可验证。
-- **默认免费**：视觉工具兜底 5 个 OVHcloud 匿名视觉模型，免注册免 Key（每 IP、
-  每模型 2 次/分钟）；用户自备视觉模型（智谱/百炼/OpenRouter 等）优先调用。
-- **14 个深看工具**：Q&A / 定位 / 裁剪 / 像素比对 / 取色 / OCR / SVG 矢量化 / 抠图 /
-  HTML 截图 / 长截图识读等；无 Python，基于 sharp / potrace / tesseract / 系统 Chrome。
-- **设置**：设置 → 插件 → 插件配置 → **「Vision Router」**卡片；接管官方路由与否由
-  「隐身模式」开关决定（默认关，官方 `llm-deepseek` 行保持启用）。
-- **不写日志**：指向视觉工具的改写只发生在模型输入层，会话日志里仍是原图。
-
-| 文件 | 作用 |
-|---|---|
-| `plugins/dsh-vision-router/` | 插件源码（v2.1.5：宿主路由 + 14 个视觉工具 + 浏览器半设置卡） |
-| `vision.patch.yml` | 注册该插件 + 附件准入放宽（20 MiB / 100 MP / 单边 10000 px）；不接管 llm-deepseek） |
-
-## 全局技能库（dsh-skills）
-
-内置第三方插件 **dsh-skills**（[CocoSgt/dsh-skills](https://github.com/CocoSgt/dsh-skills)）。
-把散落的技能汇成全局库：Claude Code 的
-`~/.claude/skills`、项目目录、`.skill` 包等统一入库到 `$DSH_HOME/skills`（官方
-skill-filesystem 默认扫描根，watcher 实时），入库即出现在输入框的「/」斜杠菜单；
-设置页侧栏有「技能」导航页。
-
-功能：
-
-- **两种入库身份**：引用（符号链接，编辑即编辑来源）/ 副本（整树拷贝，独立演化）。
-- **全局技能页签**：＋ 新建技能、上传 `.skill`、可视化筛选；每张卡带身份徽标、
-  资源文件数、非默认调用策略；「编辑 SKILL.md」内联编辑、导出 `.skill` 整树打包、
-  打开目录、删除（引用只删链接，两步确认）。
-- **发现页签**：扫描目录 chips 就地管理，结果可「引用 / 复制」，支持「全部引用」批量。
-- 全部文案经官方 locale 服务中英渲染；同系列搭配 `dsh-attachments` / `dsh-inspector`。
-
-| 文件 | 作用 |
-|---|---|
-| `plugins/dsh-skills/` | 插件源码（宿主半：`skillHub` Typert 网关：状态 / import（引用|复制）/ edit / export；浏览器半：设置页技能中枢） |
-| `skills-hub.patch.yml` | 注册该插件（launcher 经 `--patch` 传入） |
-
-
-## MCP 服务管理
-
-内置了第三方插件 **@opendsh/dsh-plugin-setting-mcp**（npm 包），在设置页加一个
-「**MCP 服务**」入口，可**查看、新增、修改、移除、启用/停用** MCP 服务（stdio /
-Streamable HTTP），点「保存」即热更新生效（无需重启进程）。它管理的是
-`@deepseek-ai/dsh-mcp-client` 的 loader 条目，并把服务集合持久化写回 profile 的
-`cordis.patch.yml`。
-
-| 文件 | 作用 |
-|---|---|
-| `plugins/@opendsh/dsh-plugin-setting-mcp/` | 插件源码（宿主半：typert `ctx.mcp` 服务；浏览器半：设置页 MCP 服务管理） |
-| `mcp-settings.patch.yml` | 注册该插件（launcher 经 `--patch` 传入） |
-
 
 ## 用户插件（方案 C：运行时安装，不重编译）
 
@@ -238,7 +177,7 @@ Streamable HTTP），点「保存」即热更新生效（无需重启进程）�
 > `--runtime add` 会传 `-w`（profile 是 pnpm workspace 根，pnpm 需要该标志）。
 > `remove`/`list` 用包全名（如 `@scope/name`），以 `list` 输出为准。
 >
-> **两类插件都支持**：声明 `dsh.bundle` 的插件（如 updater、setting-mcp）装完自动加入 bundle 层；
+> **两类插件都支持**：声明 `dsh.bundle` 的插件（如 updater、cost-meter）装完自动加入 bundle 层；
 > 只声明 `dsh.client` 的纯前端插件（如 `@frostgao` 的主题插件）`dsh plugin add` 不会自动激活，
 > `plugins.mjs` 会在 profile 的用户层 `cordis.patch.yml` 里自动补一条激活 row，移除时一并清理。
 
@@ -254,7 +193,7 @@ Streamable HTTP），点「保存」即热更新生效（无需重启进程）�
 - 纯演示层覆盖（走 `dsh-client-ui-theme` 的 token 覆盖），尊重 `prefers-reduced-motion`。
 
 该插件是**客户端专属**（`immediately: true`，无需在设置里开开关），随插件清单在启动时
-自动加载生效。纯 ESM、无原生二进制，依赖的 `@deepseek-ai/dsh-client-ui-theme` 为 0.1.5-rc.2 自带。
+自动加载生效。纯 ESM、无原生二进制，依赖的 `@deepseek-ai/dsh-client-ui-theme` 为 0.2.0-rc.1 自带。
 
 | 文件 | 作用 |
 |---|---|
@@ -264,7 +203,7 @@ Streamable HTTP），点「保存」即热更新生效（无需重启进程）�
 ## 会话费用统计（dsh-cost-meter）
 
 内置 **dsh-cost-meter**（[Han-1413141/dsh-cost-meter](https://github.com/Han-1413141/dsh-cost-meter)，
-v1.7.20），提供会话级费用统计：
+v1.7.45），提供会话级费用统计：
 
 - **费用**：本会话成本、当日费用、历史记录；内置 90+ 模型价格目录自动匹配，与官方价格一键同步。
 - **余额 / 额度**：官方余额、可配自定义 Provider 余额（任意 HTTP 端点）与余额进度条；主流
@@ -277,35 +216,6 @@ v1.7.20），提供会话级费用统计：
 | `plugins/dsh-cost-meter/` | 插件源码（宿主：costMeter 服务 + ledger；浏览器半：费用展示与设置） |
 | `billing.patch.yml` | 注册该插件（launcher 经 `--patch` 传入；`name:` 必须带引号，linkBundledPlugins 只收集带引号的 name） |
 
-
-## 手机访问（dsh-pocket）
-
-内置 **dsh-pocket**（[shaobeichen/dsh-pocket](https://github.com/shaobeichen/dsh-pocket)，
-v2.10.6，GPL-2.0），把 DSH「装进口袋」——**手机扫二维码实时同屏**电脑上的界面：
-
-- **局域网扫码**：设置 → **手机访问**，同一 WiFi 下手机扫码即开（自动识别本机局域网 IP；
-  独立 8 位数字密码，默认开启，可一键关闭或自定义）。
-- **公网扫码**：点「开启公网访问」→ cloudflared 快速隧道（首次自动下载）→ 出公网二维码，
-  人在外面（4G / 任何网络）也能访问；公网有独立 8 位密码（默认每次开启自动换新，可自定义）。
-- **实时同屏**：手机看到的就是电脑上的 dsh web 界面，WebSocket 全透传、双向操作，窄屏自动
-  变移动端抽屉布局；内置心跳保活与断线重连、响应 gzip/brotli 压缩。
-- **桌面版适配**：桌面端自动注入 dsh-desktop-mode=compatibility，扫码同屏正常可用；
-  插件内「更新 / 重启」两项在桌面版自动停用（由应用统一管理）。端口冲突（3081 被占）时
-  代理自动换端口，无需干预。
-
-
-| 文件 | 作用 |
-|---|---|
-| `plugins/dsh-pocket/` | 插件源码（宿主：改头反向代理 + 二维码 + 隧道；浏览器半：设置页「手机访问」+ 移动端适配） |
-| `pocket.patch.yml` | 注册该插件（launcher 经 `--patch` 传入；`name:` 带引号以便 linkBundledPlugins 软链） |
-
-> ⚠️ **安全**：DSH 能执行电脑上的代码。局域网/公网链接都配独立 8 位密码才可访问，请勿把
-> 二维码 / URL / 密码发给他人；开启公网前会强制弹出安全免责声明，用完建议及时关闭。
-> 登录状态绑定电脑上的 dsh web 进程——应用重启 / 更新后手机需重新输入一次密码。
-
-
-launcher 还会把后端目录（含内置 `node` 二进制）放在 `PATH` 最前，确保插件跑视觉
-子进程时用的是应用自带的 Node，而非可能损坏的系统 Node。
 
 ## 许可证
 

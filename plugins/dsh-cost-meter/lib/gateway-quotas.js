@@ -114,7 +114,8 @@ export function gatewaySourceFingerprint(source, keyConfigured = false) {
     id: cfg.id, type: cfg.type, baseURL: cfg.baseURL, enabled: cfg.enabled,
     display: cfg.display, refreshMinutes: cfg.refreshMinutes,
     includeProviders: cfg.includeProviders, allowedHosts: cfg.allowedHosts,
-    allowInsecureHttp: cfg.allowInsecureHttp, keyConfigured: keyConfigured === true,
+    allowInsecureHttp: cfg.allowInsecureHttp, antigravityOnlyGemini: cfg.antigravityOnlyGemini,
+    keyConfigured: keyConfigured === true,
   })
 }
 
@@ -149,6 +150,7 @@ export function normalizeGatewaySource(raw) {
     includeProviders: include,
     allowedHosts,
     allowInsecureHttp: source.allowInsecureHttp === true,
+    antigravityOnlyGemini: source.antigravityOnlyGemini === true,
   }
 }
 
@@ -500,7 +502,14 @@ async function queryApiAccount(source, managementKey, account, options = {}) {
       const object = asRecord(value)
       return object !== null && object.config !== undefined ? object.config : value
     }
-    const parsed = adapter.parse(account.provider === 'xai' ? { weekly: unpack(bodies[0]), monthly: unpack(bodies[1]) } : bodies[0], { now: options.now })
+    const parsed = adapter.parse(
+      account.provider === 'xai' ? { weekly: unpack(bodies[0]), monthly: unpack(bodies[1]) } : bodies[0],
+      {
+        now: options.now,
+        // 只有 Antigravity 有"第三方模型池"分组,其余 provider 不吃这个位。
+        ...(account.provider === 'antigravity' ? { geminiOnly: source.antigravityOnlyGemini === true } : {}),
+      },
+    )
     return publicAccount(account, { status: 'ok', windows: parsed.windows, plan: parsed.plan })
   } catch (error) {
     const code = error?.code || 'PROVIDER_PARSE_ERROR'

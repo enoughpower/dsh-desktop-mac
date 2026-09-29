@@ -22,15 +22,21 @@ import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { Ledger, applyConfigPatch, localDayKey, pickBalanceInfo, reconcileBalanceDelta, zeroDay, splitLedgerApiCost, repairLedgerPricing, dedupeWrapperProviderDays, unpriceLocalOriginModels, stripSecrets, stripSecretPatch, secretRefOf, readSecret, writeSecret, SECRET_TARGETS, looksLikeSecretHeaderValue } from './store.js'
 import { backfillLegacyLedger, importLegacyHistory, repairForkSeed, repairProviderDupes, recomputeLedgerPricingBasis } from './backfill.js'
 import { createLlmStreamBilling } from './billing-stream.js'
+import { installNativeSearchBilling, nativeSearchReconcile, isNativeSearchUsageEvent } from './native-search-billing.js'
 import { OFFICIAL_PRICING_URL, OFFICIAL_PRICING_URL_ZH, LEGACY_BASE_BOUNDARY, FLASH_PRICE_EFFECTIVE_AT, PRO_FLASH_ROUTING_EFFECTIVE_AT, normalizePrice, parsePricingHtml, repairDefaultPeakPrice, upgradeDeepSeekPriceTable, costOf, providerPriceEntryFor, buildPriceCatalog, usdFromCost, isWrapperProviderId, wrapperUpstreamProvider } from './pricing.js'
 import { createUsageDeduper, USAGE_DEDUP_WINDOW_MS, usageFingerprint } from './usage-dedup.js'
 import { CODING_PLAN_PROVIDERS, CODING_PLAN_PROVIDER_IDS, queryCodingPlan, scnetTokenPlanWindows, qwenTokenPlanWindows, emptyCustomBalance, queryCustomBalance, normalizeVolcengineKey } from './coding-plans.js'
 import { recordSamples, buildPlanStats, canonicalWindowKey, periodStartOf, aggregateUsageSince, enabledPlanSetOf, billingClassOf, pruneHourBuckets, suggestPlanAutoClasses } from './plan-billing.js'
 import { fetchWithRetry } from './net.js'
+import { createOpenRouterPriceRefresh, repairOpenRouterLedger } from './openrouter-pricing.js'
 import { queryGatewayQuota, emptyGatewayQuota, managementKeyVarOf, gatewaySourceFingerprint } from './gateway-quotas.js'
-import { stateSchema } from './typert.host.js'
+import { stateSchema, TYPERT } from './typert.host.js'
 import { customBalanceCredentialVars } from './custom-balance.js'
 import { readScnetSnapshot } from './scnet-snapshot.js'
+import { readExternalUsageSnapshot, externalTodayCostForReconcile } from './external-usage.js'
+import { queryQwenCli } from './qwen-cli.js'
+import { queryBailianCli } from './bailian-cli.js'
+import { getSessionCost as readSessionCost } from './session-tree.js'
 
 export const name = 'cost-meter'
 
@@ -49,8 +55,8 @@ const SERVER_MESSAGES = {
     balanceDisplayOff: '余额显示已关闭,请先在 显示设置 中开启',
     balanceRefreshed: '余额已刷新',
     balanceQueryFailed: '余额查询失败:{message}',
-    reconcileWarn: '对账提示:本地账本今日官方渠道费用 {cost} 与官方余额当日变动 {delta} 偏差较大,请核对价格表或近期账单',
-    goQuotaKeyMissing: '未找到 OpenCode Go API Key。有 Go 订阅的话:运行 opencode login、导出 OPENCODE_GO_API_KEY 环境变量,或在显示设置中填写 Key;没有订阅可关闭上方「启用」开关。',
+    reconcileWarn: '对账提示:本地账本及外部来源今日费用 {cost} 与官方余额当日变动 {delta} 偏差较大,请核对价格表或近期账单',
+    goQuotaKeyMissing: '未找到可用的 OpenCode Go API Key。请检查模型设置中 https://opencode.ai/zen/go/v1 路由的凭据，或在费用显示设置中填写 Go Key、导出 OPENCODE_GO_API_KEY、运行 opencode login；没有订阅可关闭「启用」。',
     goQuotaHttp: 'OpenCode Go 额度接口 HTTP {code}',
     goQuotaNoSub: '没有检测到生效的 OpenCode Go 订阅(接口返回 {code}),或 API Key 无效。没有订阅可关闭上方「启用」开关。',
     goQuotaNoUsage: 'OpenCode Go 额度响应缺少 usage 字段',
@@ -91,15 +97,22 @@ const SERVER_MESSAGES = {
     pricesSyncedFallback: '所选币种官方页同步失败({error}),已回退另一语言官方页,同步 {ids} 的价格;可稍后重试切换回目标币种',
     pricesRecomputed: '价格币种已切换,历史账目按新价目重算:{days} 天 / {sessions} 个会话(日志覆盖不全的会话保持原口径)',
     priceSyncFailed: '官方价格同步失败:{error}',
+    openrouterRefreshed: 'OpenRouter 模型价格已刷新:{count} 个模型',
+    openrouterRefreshFailed: 'OpenRouter 价格刷新失败(已保留本地快照):{error}',
     codingPlanKeyMissing: '未找到 {provider} 的凭据。请在下方填写 API Key,或配置对应环境变量/CLI 登录态;没有订阅可关闭该家的「启用」开关。',
     codingPlanUnauthorized: '{provider} 凭据无效或没有生效的订阅(接口返回 {code})。没有订阅可关闭该家的「启用」开关。',
     codingPlanHttp: '{provider} 额度接口 HTTP {code}({url})',
     codingPlanNoUsage: '{provider} 额度响应中未解析出用量窗口,接口结构可能已变化',
+    codingPlanInvalidJson: '{provider} 额度响应无法读取为有效 JSON({url})',
+    codingPlanCandidatesFailed: '{provider} 额度查询全部候选失败（按尝试顺序）',
     codingPlanUnknown: '未知的 coding plan 提供商:{provider}',
     codingPlanDisplayOff: '{provider} 额度显示已关闭,请先在面板中开启',
     codingPlanDisabled: '{provider} 额度未启用,请先在面板中开启',
     codingPlanRefreshed: '{provider} 额度已刷新',
     codingPlanQueryFailed: '{provider} 额度查询失败:{message}',
+    mimoCookieMissing: '未找到 {provider} 的凭据。请粘贴小米开放平台控制台的 Cookie(登录 platform.xiaomimimo.com 后 F12→网络→balanceAlertConfig→请求头 cookie 整段复制),或配置 MIMO_COOKIE 环境变量;tp-*/ttp-* 专用 Key 无用量端点,不支持额度查询。',
+    mimoCookieInvalid: '{provider} 的 Cookie 缺少必需字段(需要 serviceToken 与 userId)。请从浏览器重新复制整段 cookie 请求头;tp-*/ttp-* 专用 Key 不支持额度查询。',
+    mimoLoginExpired: '{provider} 的控制台登录态已过期。请重新登录 platform.xiaomimimo.com 并复制新的 Cookie。',
     scnetPlanCreditsInvalid: 'SCNet 月度 Credits 额度无效,请填写大于 0 的数值。',
     qwenPlanCreditsInvalid: '千问月度 Credits 额度无效,请填写大于 0 的数值。',
     legacyImportDone: '导入完成:更新 {days} 天、新增 {sessions} 个会话(扫描 {scanned} 份会话日志)。',
@@ -117,8 +130,8 @@ const SERVER_MESSAGES = {
     balanceDisplayOff: 'Balance display is off; enable it in Display settings first',
     balanceRefreshed: 'Balance refreshed',
     balanceQueryFailed: 'Balance query failed: {message}',
-    reconcileWarn: 'Reconciliation notice: today\'s local official-channel cost ({cost}) deviates significantly from the official balance change ({delta}); please check the price table or recent bills',
-    goQuotaKeyMissing: 'OpenCode Go API key not found. If you have a Go subscription: run opencode login, export OPENCODE_GO_API_KEY, or set the key in Display settings; otherwise turn off the Enable switch above.',
+    reconcileWarn: 'Reconciliation notice: today\'s local and external usage cost ({cost}) deviates significantly from the official balance change ({delta}); please check the price table or recent bills',
+    goQuotaKeyMissing: 'No usable OpenCode Go API key found. Check the credential for your https://opencode.ai/zen/go/v1 route in Models, set a Go key in Cost display settings, export OPENCODE_GO_API_KEY, or run opencode login; otherwise turn off Enable.',
     goQuotaHttp: 'OpenCode Go quota API returned HTTP {code}',
     goQuotaNoSub: 'No active OpenCode Go subscription detected (API returned {code}), or the API key is invalid. Turn off the Enable switch above if you have no subscription.',
     goQuotaNoUsage: 'OpenCode Go quota response is missing the usage field',
@@ -159,15 +172,22 @@ const SERVER_MESSAGES = {
     pricesSyncedFallback: 'Syncing the official page for the selected currency failed ({error}); fell back to the other language page and synced prices for {ids}. You can switch back and retry later.',
     pricesRecomputed: 'Pricing currency switched; history has been re-costed on the new price table: {days} day(s) / {sessions} session(s) (sessions without full log coverage keep their original basis)',
     priceSyncFailed: 'Official price sync failed: {error}',
+    openrouterRefreshed: 'OpenRouter model prices refreshed: {count} models',
+    openrouterRefreshFailed: 'OpenRouter price refresh failed (kept local snapshot): {error}',
     codingPlanKeyMissing: 'No credentials found for {provider}. Enter the API key below, or configure the matching environment variable / CLI login; turn off the Enable switch if you have no subscription.',
     codingPlanUnauthorized: '{provider} credentials are invalid or no active subscription was detected (API returned {code}). Turn off the Enable switch if you have no subscription.',
     codingPlanHttp: '{provider} quota API returned HTTP {code} ({url})',
     codingPlanNoUsage: 'No usage windows could be parsed from the {provider} quota response; the API shape may have changed',
+    codingPlanInvalidJson: '{provider} quota response could not be read as valid JSON ({url})',
+    codingPlanCandidatesFailed: 'All {provider} quota candidates failed (in request order)',
     codingPlanUnknown: 'Unknown coding plan provider: {provider}',
     codingPlanDisplayOff: '{provider} quota display is off; enable it in the panel first',
     codingPlanDisabled: '{provider} quota is disabled; enable it in the panel first',
     codingPlanRefreshed: '{provider} quota refreshed',
     codingPlanQueryFailed: '{provider} quota query failed: {message}',
+    mimoCookieMissing: 'No credentials found for {provider}. Paste the Xiaomi MiMo console cookie (log in at platform.xiaomimimo.com, then F12 → Network → balanceAlertConfig → copy the full cookie request header), or set the MIMO_COOKIE environment variable; tp-*/ttp-* plan keys have no usage endpoint and cannot query quotas.',
+    mimoCookieInvalid: 'The {provider} cookie is missing required fields (serviceToken and userId). Copy the full cookie request header from your browser again; tp-*/ttp-* plan keys cannot query quotas.',
+    mimoLoginExpired: 'The {provider} console login has expired. Log in at platform.xiaomimimo.com again and copy a fresh cookie.',
     scnetPlanCreditsInvalid: 'Invalid SCNet monthly credits quota; enter a value greater than 0.',
     qwenPlanCreditsInvalid: 'Invalid Qwen monthly credits quota; enter a value greater than 0.',
     legacyImportDone: 'Import finished: {days} day(s) updated, {sessions} session(s) added (scanned {scanned} session logs).',
@@ -281,6 +301,7 @@ const usageProjectionStateSchema = z.object({
     at: z.number(),
     w: z.number().optional(),
   })).max(32).optional(),
+  nativeSearchIds: z.array(z.string()).max(128).optional(),
 })
 
 /** state → wire payload 读侧投影(新版 wire.view 与旧版 view 共用同一实现)。 */
@@ -344,6 +365,7 @@ function makeCostUsageProjection(ledger) {
     enabled: ledger.config?.peakEnabled === true,
     effectiveAtMs: Date.parse(ledger.config?.peakEffectiveAt ?? ''),
     windows: ledger.config?.peakWindows,
+    holidays: ledger.config?.peakHolidays,
   })
   // 扣回影子累计(种子量)并清理空桶/last,标记已扣除。
   const deductShadow = (state) => {
@@ -377,8 +399,16 @@ function makeCostUsageProjection(ledger) {
     // v7→v8(issue #77):折叠计入 compaction/summary(压缩摘要调用,此前漏计);
     // 升版本触发宿主对旧 checkpoint 全量重放,历史摘要调用量随之补齐。
     // v8→v9(issue #109):默认回退补齐峰谷档位，旧金额 checkpoint 需按事件重放。
-    stateVersion: 9,
-    init: () => ({ provider: 'deepseek', model: 'default', totals: zeroBuckets(), byModel: {}, byProviderModel: {}, last: null, createdAt: 0, seedEndSeq: -1, shadow: emptyShadow(), seedLength: -1, seedDeducted: false, recent: [] }),
+    // v10 (#130):新版宿主 init(header, inheritedEventCount) 区分恢复和继承。
+    // 普通重启也追加 end-seed，不能把恢复前已付费的调用当作 fork 种子扣掉。
+    stateVersion: 10,
+    init: (header, inheritedEventCount) => {
+      const known = Number.isInteger(inheritedEventCount) && inheritedEventCount >= 0
+      const boundary = known && inheritedEventCount > 0 ? inheritedEventCount : -1
+      return { provider: 'deepseek', model: 'default', totals: zeroBuckets(), byModel: {}, byProviderModel: {}, last: null,
+        createdAt: Number(header?.createdAt) || 0, seedEndSeq: boundary, shadow: emptyShadow(),
+        seedLength: boundary, seedDeducted: known, recent: [] }
+    },
     apply(state, event) {
       // 兼容旧 checkpoint 的缺字段(版本升级前持久化的 v5 状态):缺省回落。
       if (state.seedDeducted === undefined) state.seedDeducted = false
@@ -478,6 +508,8 @@ function makeCostUsageProjection(ledger) {
       let eventProvider = null
       let eventModel = null
       let keyOverride = null
+      const nativeSearch = isNativeSearchUsageEvent(event)
+      let nativeSearchIds = state.nativeSearchIds ?? []
       // 判空用 != null:usage === null 时 !== undefined 会放行,随后读
       // usage.inputTokens 直接抛 TypeError 打断投影;billing-stream 侧同处
       // 还会让 null 覆盖先前捕获的有效 usage 快照导致整次调用漏计。
@@ -489,6 +521,15 @@ function makeCostUsageProjection(ledger) {
         usage = event.data.usage
         turn = event.data.turn ?? 0
         step = event.data.step ?? 0
+        eventProvider = event.data.message?.source?.provider
+        eventModel = event.data.message?.source?.model
+      } else if (nativeSearch && event.data?.usage != null && typeof event.data.requestId === 'string') {
+        if (nativeSearchIds.includes(event.data.requestId)) return state
+        nativeSearchIds = [...nativeSearchIds.slice(-127), event.data.requestId]
+        usage = event.data.usage
+        eventProvider = event.data.provider
+        eventModel = event.data.model
+        keyOverride = `search:${event.data.requestId}`
       } else if (event.type === 'compaction/summary' && event.data?.usage != null) {
         usage = event.data.usage
         const source = event.data.message?.source ?? {}
@@ -528,7 +569,8 @@ function makeCostUsageProjection(ledger) {
         return state
       }
       // 按事件时刻计费(历史正确):峰谷时代前用 legacyBase,之后按峰谷两档。
-      const atMs = Number.isFinite(Number(event.time)) && Number(event.time) > 0 ? Number(event.time) : Date.now()
+      const billingTime = nativeSearch ? event.data.startedAtMs : event.time
+      const atMs = Number.isFinite(Number(billingTime)) && Number(billingTime) > 0 ? Number(billingTime) : Date.now()
       // 指纹窗口去重(与 lib/usage-dedup.js 同语义的序列化形态):先按窗口清扫
       // 滚动列表,重复转发跳过(清扫结果仍落回 state,保持窗口推进)。有界:
       // 超过 24 条先截断再判定,checkpoint 体积恒定。compaction/summary 不参与:
@@ -551,9 +593,7 @@ function makeCostUsageProjection(ledger) {
       const peak = peakConfig()
       peak.enabled = resolved.billingMode === 'deepseek-peak' && peak.enabled
       const priced = resolved.priced ? costOf(buckets, resolved.entry, atMs, peak) : 0
-      const billed = usdFromCost(priced,
-        resolved.billingMode === 'deepseek-peak' && ledger.config.prices?.currency === 'CNY' ? 'CNY' : 'USD',
-        ledger.config.exchangeRate)
+      const billed = usdFromCost(priced, resolved.currency, ledger.config.exchangeRate)
       // 同一 (turn, step) 的最终样本替换流式样本,先减后加,避免重复计数。
       const totals = { ...state.totals, reasoning: state.totals.reasoning ?? 0 }
       const byModel = { ...state.byModel }
@@ -603,7 +643,7 @@ function makeCostUsageProjection(ledger) {
       }
       // createdAt/seedLength/seedDeducted 必须随状态携带:usage 样本更新不能丢掉 fork 过滤基准。
       // recent 随行:包装层转发对去重的滚动窗口状态(有界 ≤25 条)。
-      return { provider: state.provider, model: state.model, totals, byModel, byProviderModel, createdAt: state.createdAt, seedEndSeq: state.seedEndSeq, seedLength: state.seedLength, seedDeducted: state.seedDeducted, shadow: shadowAgg, recent, last: { key, provider: effectiveProvider, model, buckets, cost: billed } }
+      return { provider: state.provider, model: state.model, totals, byModel, byProviderModel, createdAt: state.createdAt, seedEndSeq: state.seedEndSeq, seedLength: state.seedLength, seedDeducted: state.seedDeducted, shadow: shadowAgg, recent, nativeSearchIds, last: nativeSearch ? state.last : { key, provider: effectiveProvider, model, buckets, cost: billed } }
     },
     view: projectionView,
     // DSH 0.1.1-rc.1 起会话投影需声明 wire 才会向客户端推送(PR #39 by
@@ -663,9 +703,35 @@ function findGoKeyInAuthJson() {
 }
 
 /**
- * 解析 OpenCode Go API Key(v1.6.8 起优先级调整):
- * DSH 凭据库(OPENCODE_GO_API_KEY)→ 环境变量 OPENCODE_GO_API_KEY → 兼容旧名
- * OPENCODE_API_KEY → opencode auth.json 自动发现 → config 遗留明文兜底。
+ * 查询与配置状态共用候选顺序。只从官方 Go 端点读取 apiKeyEnv，避免
+ * 将其他提供商、代理或 OpenCode Zen 路由的凭据用于 Go 额度查询。
+ * 每次读取当前 settings 快照，路由改名或凭据轮换后无需重启插件。
+ */
+function goKeyRefs(ctx) {
+  const refs = new Set(['OPENCODE_GO_API_KEY'])
+  try {
+    const providers = ctx?.get?.('settings')?.get?.('llm-pi-ai')?.providers
+    if (providers && typeof providers === 'object' && !Array.isArray(providers)) {
+      for (const profile of Object.values(providers)) {
+        if (typeof profile?.baseURL !== 'string' || typeof profile?.apiKeyEnv !== 'string') continue
+        try {
+          const url = new URL(profile.baseURL)
+          if (url.origin !== 'https://opencode.ai' || !/^\/zen\/go\/v1\/?$/.test(url.pathname)
+            || url.username || url.password || url.search || url.hash) continue
+          const ref = profile.apiKeyEnv.trim()
+          if (ref) refs.add(credentialRef(ref))
+        } catch { /* 无效端点不参与发现。 */ }
+      }
+    }
+  } catch { /* 旧宿主无此设置段时仍使用既有来源。 */ }
+  refs.add('OPENCODE_API_KEY')
+  return [...refs]
+}
+
+/**
+ * 解析 OpenCode Go API Key：专用引用 → 官方 Go 路由引用 → 兼容旧名
+ * OPENCODE_API_KEY → opencode auth.json → config 遗留明文。
+ * 每个引用先查 DSH 凭据库，再查同名环境变量。
  *
  * 「显式配置」由首选降为**末位兜底**:v1.6.8 起密钥统一由 DSH 凭据库托管,config 里的
  * goQuota.apiKey 只是迁移前遗留的明文(启动期 runSecretMigration 导入凭据库后即清空,
@@ -676,15 +742,15 @@ function findGoKeyInAuthJson() {
  */
 async function resolveGoKey(ctx, config) {
   const credentials = ctx.get('credentials')
-  if (credentials !== undefined) {
-    try {
-      const hit = await credentials.resolve(credentialRef('OPENCODE_GO_API_KEY'))
-      if (typeof hit?.value === 'string' && hit.value.length > 0) return hit.value
-    } catch {
-      // 凭证解析失败时回退到环境变量。
+  for (const name of goKeyRefs(ctx)) {
+    if (credentials !== undefined) {
+      try {
+        const hit = await credentials.resolve(credentialRef(name))
+        if (typeof hit?.value === 'string' && hit.value.trim().length > 0) return hit.value.trim()
+      } catch {
+        // 单个引用不可用时继续尝试环境变量及其他候选。
+      }
     }
-  }
-  for (const name of ['OPENCODE_GO_API_KEY', 'OPENCODE_API_KEY']) {
     const value = String(process.env[name] ?? '').trim()
     if (value.length > 0) return value
   }
@@ -711,7 +777,7 @@ function normalizeGoWindow(raw) {
  * @param config - 插件配置(goQuota.apiKey / 消息语言)。
  * @param locale - 消息语言(zh/en)。
  */
-async function queryGoQuota(ctx, config, locale) {
+async function queryGoQuota(ctx, config, locale, signal) {
   const key = await resolveGoKey(ctx, config)
   if (key === null) {
     const error = new Error(tmsg(locale, 'goQuotaKeyMissing'))
@@ -721,6 +787,7 @@ async function queryGoQuota(ctx, config, locale) {
   // Cloudflare 前置会间歇性重置连接(ECONNRESET → fetch failed):瞬时网络错误
   // 自动重试,401/403 等业务状态仍走下方原语义(issue #28)。
   const response = await fetchWithRetry(GO_QUOTA_URL, {
+    signal,
     headers: {
       authorization: `Bearer ${key}`,
       // 浏览器 UA:避免被 opencode.ai 前置 Cloudflare 以 error 1010 拦截。
@@ -878,7 +945,7 @@ function balanceEndpoint(baseURL) {
  * @param locale - 消息语言(zh/en)。
  * @returns { currency, totalBalance, grantedBalance, toppedUpBalance }。
  */
-async function queryBalance(ctx, locale) {
+async function queryBalance(ctx, locale, signal) {
   const settings = ctx.get('settings')
   const section = typeof settings?.get === 'function' ? settings.get('llm-deepseek') : undefined
   const baseURL = section?.baseURL
@@ -910,6 +977,7 @@ async function queryBalance(ctx, locale) {
   }
   // 瞬时网络错误自动重试(issue #28 同一封装);非 2xx 状态仍按业务错误处理。
   const response = await fetchWithRetry(endpoint, {
+    signal,
     headers: { authorization: `Bearer ${apiKey}` },
   }, { timeoutMs: 15000 })
   if (!response.ok) throw new Error(tmsg(locale, 'balanceHttp', { code: String(response.status) }))
@@ -979,7 +1047,7 @@ async function buildState(ledger, balance = emptyBalance(), goQuota = emptyGoQuo
   const dayKey = localDayKey(now)
   const monthKey = dayKey.slice(0, 7)
   const secretMigration = secretMigrationNotice(ledger)
-  const goKeyInfo = await describeGoKey(ctx?.get?.('credentials'), ledger.config)
+  const goKeyInfo = await describeGoKey(ctx, ledger.config)
   // 自定义余额 {{VAR}} 占位符的凭据配置状态(v1.7.6,issue #86):与 keyConfigured 同
   // 语义的 describe 摘要,前端据此渲染 write-only 输入框;无占位符/凭据服务缺席时空表。
   const customVarStatus = {}
@@ -1012,7 +1080,8 @@ async function buildState(ledger, balance = emptyBalance(), goQuota = emptyGoQuo
     days: ledger.days ?? {},
     hourBuckets: ledger.planHourBuckets,
     samples: ledger.planSamples,
-    codingPlans,
+    // Account-wide CLI usage cannot be attributed to this DSH ledger's calls.
+    codingPlans: ['cli', 'bailian'].includes(ledger.config.codingPlans?.qwen?.quotaSource) ? { ...codingPlans, qwen: undefined } : codingPlans,
     goQuota,
     config: ledger.config,
     nowMs: now,
@@ -1095,10 +1164,13 @@ async function buildState(ledger, balance = emptyBalance(), goQuota = emptyGoQuo
     // 自定义余额 {{VAR}} 占位符凭据状态(v1.7.6,issue #86):变量名 → { configured, source }。
     customVarStatus,
     // 余额差交叉校验提示(issue #18):本地今日合计与官方余额当日变动偏差超阈时 ok=false。
-    reconcile,
+    reconcile: nativeSearchReconcile(ledger, localeOf(ledger.config), reconcile),
     codingPlans,
     planStats,
     history: ledger.history(90),
+    // 独立来源账本只读快照；today/month/history 继续仅指 DSH，官方余额对账不混入外部费用。
+    ...(await readExternalUsageSnapshot(join(dirname(ledger.path), 'external_usage.json'), ledger.config, now)
+      .then(externalUsage => externalUsage ? { externalUsage } : {})),
     // 密钥脱敏(v1.6.8):下发给前端的 config 不含任何明文密钥,只留空占位字符串。
     config: clientConfig,
     priceCatalog: ledger.config.prices?.currency === 'CNY' ? PRICE_CATALOG_CNY : PRICE_CATALOG,
@@ -1146,6 +1218,20 @@ async function fetchPricingHtml(locale, pricingCurrency) {
   const text = await response.text()
   if (text.length < 500) throw new Error(tmsg(locale, 'pageTooShort'))
   return text
+}
+
+/** fetchPrices 的 OpenRouter 附加腿:成功返回 tmsg 备注,失败返回失败备注,
+ *  永不抛错(不翻转官方同步的 ok 状态)。 */
+async function openRouterRefreshNote(openRouterPrices, locale) {
+  try {
+    const { count } = await openRouterPrices.refresh()
+    return tmsg(locale, 'openrouterRefreshed', { count })
+  } catch (error) {
+    const detail = error?.code === 'ERR_NO_MODELS'
+      ? tmsg(locale, 'noModelsParsed')
+      : (error instanceof Error ? error.message : String(error))
+    return tmsg(locale, 'openrouterRefreshFailed', { error: detail })
+  }
 }
 
 /**
@@ -1208,36 +1294,58 @@ async function describePlanKey(credentials, id, config) {
 
 /**
  * 查询 OpenCode Go 密钥的配置状态(永不返回值本身),语义同 describePlanKey。
- * @param credentials - 宿主凭据服务(可能 undefined)。
+ * @param ctx - 宿主上下文(可能 null)。
  * @param config - 插件配置(用于判定遗留明文)。
  * @returns {{ keyConfigured: boolean, keySource: string }}
  */
-async function describeGoKey(credentials, config) {
+async function describeGoKey(ctx, config) {
+  const credentials = ctx?.get?.('credentials')
   const fallback = { keyConfigured: false, keySource: '' }
   const legacy = readSecret(config, 'goQuota').length > 0
-  const ref = secretRefOf('goQuota')
-  if (ref === null) return fallback
-  if (credentials === undefined) return legacy ? { keyConfigured: true, keySource: 'legacy' } : fallback
-  try {
-    const info = await credentials.describe(credentialRef(ref))
-    if (info?.configured === true) {
-      return { keyConfigured: true, keySource: typeof info.source === 'string' ? info.source : '' }
+  for (const name of goKeyRefs(ctx)) {
+    if (credentials !== undefined) {
+      try {
+        const info = await credentials.describe(credentialRef(name))
+        if (info?.configured === true) {
+          return { keyConfigured: true, keySource: typeof info.source === 'string' ? info.source : '' }
+        }
+      } catch { /* 单个引用不可用时继续尝试其他来源。 */ }
     }
-  } catch {
-    // describe 不可用:退回遗留明文判定。
+    if (String(process.env[name] ?? '').trim()) return { keyConfigured: true, keySource: 'env' }
   }
   // 自动发现路径(opencode auth.json)也是「已配置」,但不暴露来源文件细节。
   if (findGoKeyInAuthJson() !== null) return { keyConfigured: true, keySource: 'auto' }
   return legacy ? { keyConfigured: true, keySource: 'legacy' } : fallback
 }
 
-function createService(ctx, ledger) {
+function createService(ctx, ledger, openRouterPrices) {
+  let active = true
   // 余额进程内缓存:display=off 时不清缓存但不下发;按 refreshMinutes 过期。
   let balanceCache = { fetchedAt: 0, value: emptyBalance() }
   // OpenCode Go 订阅额度进程内缓存(同上策略)。
   let goQuotaCache = { fetchedAt: 0, value: emptyGoQuota() }
   // Coding plan 额度进程内缓存(每家一个条目,同上策略)。
   let codingPlanCaches = {}
+  const resetQueryCache = target => {
+    if (target === 'balance') {
+      balanceCache.controller?.abort()
+      balanceCache = { fetchedAt: 0, value: emptyBalance() }
+    } else if (target === 'goQuota') {
+      goQuotaCache.controller?.abort()
+      goQuotaCache = { fetchedAt: 0, value: emptyGoQuota() }
+    } else if (target.startsWith('codingPlans.')) {
+      const id = target.split('.')[1]
+      codingPlanCaches[id]?.controller?.abort()
+      delete codingPlanCaches[id]
+    }
+  }
+  ctx.effect(() => () => {
+    active = false
+    gatewayQuotaCaches = {}
+    resetQueryCache('balance')
+    resetQueryCache('goQuota')
+    for (const id of Object.keys(codingPlanCaches)) resetQueryCache('codingPlans.' + id)
+  }, 'cost-meter: quota query cancellation')
   // 余额差对账提示(drift 时 ok=false 携带文案,其余静默)。
   let reconcileNotice = { ok: true, message: '' }
   // Gateway quota 每个 source 独立缓存；value 保留 last-known-good，失败时只改状态。
@@ -1313,8 +1421,10 @@ function createService(ctx, ledger) {
 
   /** 按需刷新余额(过期或 force);失败落 error 状态,不影响其余状态字段。 */
   const ensureBalance = async (force = false) => {
+    if (!active) return
     const config = balanceConfig()
     if (config.display === 'off') {
+      balanceCache.controller?.abort()
       balanceCache = { fetchedAt: Date.now(), value: emptyBalance() }
       return
     }
@@ -1326,10 +1436,13 @@ function createService(ctx, ledger) {
       // force 链式等待:等上一个任务结束后由本调用继续走新建流程,
       // 保证手动强制刷新不被在途任务吞掉(否则返回的是即将过期的旧数据)。
       await prev.catch(() => {})
+      if (!active || balanceConfig().display === 'off') return
       if (balanceCache.inFlight === prev) break // 上一个任务结束后由本调用继续走新建流程
     }
-    const task = queryBalance(ctx, localeOf(ledger.config)).then(result => {
-      balanceCache = { fetchedAt: Date.now(), value: { status: 'ok', message: '', fetchedAt: Date.now(), ...result } }
+    const controller = new AbortController()
+    const task = queryBalance(ctx, localeOf(ledger.config), controller.signal).then(async result => {
+      if (!active || balanceCache.inFlight !== task) return
+      balanceCache = { ...balanceCache, fetchedAt: Date.now(), value: { status: 'ok', message: '', fetchedAt: Date.now(), ...result } }
       // 余额差交叉校验(issue #18):官方余额当日变动 vs 本地账本今日官方渠道费用,偏差超阈提示。
       // issue #36:Coding Plan / 自定义 Provider 的费用不动官方余额,对账只统计 deepseek 渠道,否则订阅用户会恒报 drift。
       if ((ledger.config?.balance?.reconcile ?? true) === true && balanceCache.value.status === 'ok') {
@@ -1355,16 +1468,21 @@ function createService(ctx, ledger) {
             : ''
           return symbol + Number(event.spent).toFixed(4) + converted
         }
-        const { ref, event } = reconcileBalanceDelta(ledger.balanceRef, balanceCache.value, ledger.todayOfficialCost(), localDayKey(nowMs), nowMs, { exchangeRate: ledger.config.exchangeRate })
+        const external = await readExternalUsageSnapshot(join(dirname(ledger.path), 'external_usage.json'), ledger.config, nowMs)
+        if (!active || balanceCache.inFlight !== task) return
+        const externalCost = externalTodayCostForReconcile(external)
+        const todayCost = ledger.todayOfficialCost() + (externalCost ?? 0)
+        const { ref, event } = reconcileBalanceDelta(ledger.balanceRef, balanceCache.value, todayCost, localDayKey(nowMs), nowMs, { exchangeRate: ledger.config.exchangeRate })
         if (ref !== ledger.balanceRef) {
           ledger.balanceRef = ref
           ledger.scheduleWrite()
         }
-        reconcileNotice = event !== null && event.kind === 'drift'
+        reconcileNotice = externalCost !== null && event !== null && event.kind === 'drift'
           ? { ok: false, message: tmsg(localeOf(ledger.config), 'reconcileWarn', { cost: nativeCost(event), delta: nativeDelta(event) }) }
           : { ok: true, message: '' }
       }
     }, error => {
+      if (!active || balanceCache.inFlight !== task) return
       // 软失败(未配置 Key / 非官方端点等守卫错误,不会自愈)标记 fetchedAt 避免无意义重试;
       // 硬失败(网络超时等临时性问题)写入 error 状态但保留外层 fetchedAt——UI 仍显示失败原因,
       // 且下次轮询自动重试,不再被缓存有效期钉死(PR #40 补全)。
@@ -1379,13 +1497,16 @@ function createService(ctx, ledger) {
       if (balanceCache.inFlight === task) delete balanceCache.inFlight
     })
     balanceCache.inFlight = task
+    balanceCache.controller = controller
     await task
   }
 
   /** 按需刷新 OpenCode Go 额度(过期或 force);未启用/显示关闭/失败均落空或 error 状态。 */
   const ensureGoQuota = async (force = false) => {
+    if (!active) return
     const config = goQuotaConfig()
     if (config.enabled === false || config.display === 'off') {
+      goQuotaCache.controller?.abort()
       goQuotaCache = { fetchedAt: Date.now(), value: emptyGoQuota() }
       return
     }
@@ -1397,12 +1518,16 @@ function createService(ctx, ledger) {
       // force 链式等待:等上一个任务结束后由本调用继续走新建流程,
       // 保证手动强制刷新不被在途任务吞掉(否则返回的是即将过期的旧数据)。
       await prev.catch(() => {})
+      if (!active || goQuotaConfig().enabled === false || goQuotaConfig().display === 'off') return
       if (goQuotaCache.inFlight === prev) break // 上一个任务结束后由本调用继续走新建流程
     }
-    const task = queryGoQuota(ctx, ledger.config, localeOf(ledger.config)).then(result => {
+    const controller = new AbortController()
+    const task = queryGoQuota(ctx, ledger.config, localeOf(ledger.config), controller.signal).then(result => {
+      if (!active || goQuotaCache.inFlight !== task) return
       goQuotaCache = { fetchedAt: Date.now(), value: { status: 'ok', message: '', fetchedAt: Date.now(), ...result } }
       recordQuotaSamples('go', { rolling: result.rolling, weekly: result.weekly, monthly: result.monthly })
     }, error => {
+      if (!active || goQuotaCache.inFlight !== task) return
       // 失败不更新外层 fetchedAt:让下次轮询重试,而非在缓存有效期内一直跳过(PR #40)。
       // 软失败(未登录/无订阅,不会自愈)完整缓存避免无意义重试;硬失败(网络超时等)写入
       // error 状态但保留旧 fetchedAt——UI 仍显示失败原因,轮询到点自动重试。
@@ -1417,6 +1542,7 @@ function createService(ctx, ledger) {
       if (goQuotaCache.inFlight === task) delete goQuotaCache.inFlight
     })
     goQuotaCache.inFlight = task
+    goQuotaCache.controller = controller
     await task
   }
 
@@ -1429,6 +1555,18 @@ function createService(ctx, ledger) {
   const customBalanceConfigs = () => Array.isArray(ledger.config?.customBalances)
     ? ledger.config.customBalances : []
   const customBalanceCaches = {}
+  const customBalanceFingerprint = index => {
+    // Currency conversion is presentation-only; it must preserve the API snapshot.
+    const { convertToDisplayCurrency, labelEn, ...query } = customBalanceConfigs()[index] ?? {}
+    return JSON.stringify([query, localeOf(ledger.config)])
+  }
+  const discardCustomBalanceCache = index => {
+    customBalanceCaches[index]?.controller?.abort()
+    delete customBalanceCaches[index]
+  }
+  ctx.effect(() => () => {
+    for (const index of Object.keys(customBalanceCaches)) discardCustomBalanceCache(index)
+  }, 'cost-meter: custom balance cancellation')
   /**
    * 作废引用了指定变量的全部自定义余额快照缓存(v1.7.6,issue #86):
    * setCredential / clearCredential 写过 customVar 后调用,下一次状态组装
@@ -1439,17 +1577,24 @@ function createService(ctx, ledger) {
     for (const key of Object.keys(customBalanceCaches)) {
       const index = Number(key)
       const uses = customBalanceCredentialVars(entries[index]).includes(varName)
-      if (uses) customBalanceCaches[index] = { fetchedAt: 0, value: emptyCustomBalance() }
+      if (uses) discardCustomBalanceCache(index)
     }
   }
   const customBalanceCacheAt = index => {
+    const fingerprint = customBalanceFingerprint(index)
+    if (customBalanceCaches[index]?.fingerprint !== fingerprint) discardCustomBalanceCache(index)
     if (customBalanceCaches[index] === undefined) {
-      customBalanceCaches[index] = { fetchedAt: 0, value: emptyCustomBalance() }
+      customBalanceCaches[index] = { fingerprint, fetchedAt: 0, value: emptyCustomBalance() }
     }
     return customBalanceCaches[index]
   }
   const ensureCustomBalance = async (force = false, index = null) => {
+    if (!active) return
     const entries = customBalanceConfigs()
+    for (const key of Object.keys(customBalanceCaches)) {
+      if (!entries[key]) discardCustomBalanceCache(key)
+      else customBalanceCacheAt(key)
+    }
     const targets = []
     if (index === null) {
       // ambient:全部启用且非 off 的条目;一条都没有时清理出空缓存(与旧单条 off 行为一致)。
@@ -1458,7 +1603,7 @@ function createService(ctx, ledger) {
       })
       if (targets.length === 0) {
         for (const key of Object.keys(customBalanceCaches)) {
-          customBalanceCaches[key] = { fetchedAt: Date.now(), value: emptyCustomBalance() }
+          discardCustomBalanceCache(key)
         }
         return
       }
@@ -1471,6 +1616,7 @@ function createService(ctx, ledger) {
   const ensureCustomBalanceEntry = async (force, index) => {
     const config = customBalanceConfigs()[index]
     const cache = customBalanceCacheAt(index)
+    const current = () => active && customBalanceCaches[index] === cache && cache.fingerprint === customBalanceFingerprint(index)
     const interval = Math.max(1, Number(config?.refreshMinutes) || 15) * 60_000
     if (!force && Date.now() - cache.fetchedAt < interval) return
     while (cache.inFlight !== undefined) {
@@ -1479,50 +1625,50 @@ function createService(ctx, ledger) {
       // force 链式等待:等上一个任务结束后由本调用继续走新建流程,
       // 保证手动强制刷新不被在途任务吞掉(否则返回的是即将过期的旧数据)。
       await prev.catch(() => {})
+      if (!current()) return
       if (cache.inFlight === prev) break // 上一个任务结束后由本调用继续走新建流程
     }
     // queryCustomBalance 的单条入参重载:customBalances[i] 视图(兼容旧键,设置页
     // 面向 entries 编辑)。
     const configForEntry = { ...ledger.config, customBalance: config, customBalances: undefined }
-    const task = queryCustomBalance(ctx, configForEntry).then(result => {
-      customBalanceCaches[index] = {
-        fetchedAt: Date.now(),
-        value: { status: 'ok', message: '', fetchedAt: Date.now(), index, ...result },
-      }
+    cache.controller = new AbortController()
+    const task = queryCustomBalance(ctx, configForEntry, { signal: cache.controller.signal }).then(result => {
+      if (!current()) return
+      cache.fetchedAt = Date.now()
+      cache.value = { status: 'ok', message: '', fetchedAt: cache.fetchedAt, index, ...result }
     }, error => {
+      if (!current()) return
       // 失败不更新外层 fetchedAt:让下次轮询重试(PR #40,与 ensureGoQuota 同策略)。
       // 软失败完整缓存;硬失败写 error 状态但保留旧 fetchedAt(UI 可见 + 自动重试)。
       const now = Date.now()
       const message = error instanceof Error ? error.message : String(error)
       if (error && error.soft === true) {
-        customBalanceCaches[index] = {
+        cache.fetchedAt = now
+        cache.value = {
+          ...emptyCustomBalance(),
+          label: typeof config?.label === 'string' ? config.label : '',
+          status: 'off',
+          message,
           fetchedAt: now,
-          value: {
-            ...emptyCustomBalance(),
-            label: typeof config?.label === 'string' ? config.label : '',
-            status: 'off',
-            message,
-            fetchedAt: now,
-            index,
-          },
+          index,
         }
       } else {
-        customBalanceCaches[index] = {
-          ...cache,
-          value: {
-            ...emptyCustomBalance(),
-            label: typeof config?.label === 'string' ? config.label : '',
-            status: 'error',
-            message,
-            fetchedAt: now,
-            index,
-          },
+        cache.value = {
+          ...emptyCustomBalance(),
+          label: typeof config?.label === 'string' ? config.label : '',
+          status: 'error',
+          message,
+          fetchedAt: now,
+          index,
         }
       }
     }).finally(() => {
-      if (customBalanceCaches[index]?.inFlight === task) delete customBalanceCaches[index].inFlight
+      if (cache.inFlight === task) {
+        delete cache.inFlight
+        delete cache.controller
+      }
     })
-    customBalanceCaches[index] = { ...cache, inFlight: task }
+    cache.inFlight = task
     await task
   }
   /** 多条快照(仅含有缓存值的条目;旧单条镜像取第一条可见条目)。 */
@@ -1530,7 +1676,7 @@ function createService(ctx, ledger) {
     const entries = customBalanceConfigs()
     const out = []
     entries.forEach((entry, index) => {
-      const cached = customBalanceCaches[index]
+      const cached = active ? customBalanceCacheAt(index) : undefined
       if (cached === undefined) return
       out.push({ ...emptyCustomBalance(), ...cached.value, index })
     })
@@ -1554,12 +1700,15 @@ function createService(ctx, ledger) {
     const out = {}
     for (const id of CODING_PLAN_PROVIDER_IDS) {
       const cfg = codingPlanConfigOf(id)
-      const cached = codingPlanCaches[id]?.value ?? emptyCodingPlan()
+      const entry = codingPlanCaches[id]
+      const fingerprint = id === 'qwen' ? qwenFingerprint() : id === 'minimax' ? miniMaxFingerprint() : entry?.fingerprint
+      const cached = entry?.fingerprint !== fingerprint ? emptyCodingPlan() : entry?.value ?? emptyCodingPlan()
       out[id] = {
         enabled: cfg.enabled === true,
         display: typeof cfg.display === 'string' ? cfg.display : 'settings',
         refreshMinutes: Number.isFinite(Number(cfg.refreshMinutes)) && Number(cfg.refreshMinutes) > 0 ? Number(cfg.refreshMinutes) : 15,
         apiKey: '',
+        ...(id === 'minimax' ? { baseUrl: cfg.baseUrl ?? '' } : {}),
         ...await describePlanKey(credentials, id, ledger.config),
         ...cached,
         windows: cached.windows !== null && typeof cached.windows === 'object' ? cached.windows : {},
@@ -1569,15 +1718,87 @@ function createService(ctx, ledger) {
           ...(typeof cfg.planStart === 'string' ? { planStart: cfg.planStart } : {}),
         } : {}),
         ...(id === 'qwen' && cfg.rates !== null && typeof cfg.rates === 'object' && !Array.isArray(cfg.rates) ? { rates: cfg.rates } : {}),
+        ...(id === 'qwen' ? { quotaSource: ['cli', 'bailian'].includes(cfg.quotaSource) ? cfg.quotaSource : 'local' } : {}),
       }
     }
     return out
   }
 
+  const qwenFingerprint = () => JSON.stringify([codingPlanConfigOf('qwen'), localeOf(ledger.config)])
+  const ensureQwenPlan = async force => {
+    const config = codingPlanConfigOf('qwen'), fingerprint = qwenFingerprint()
+    let cache = codingPlanCaches.qwen
+    if (cache?.fingerprint !== fingerprint) {
+      cache?.controller?.abort()
+      cache = codingPlanCaches.qwen = { fingerprint, fetchedAt: 0, value: emptyCodingPlan() }
+    }
+    if (config.enabled !== true || config.display === 'off') return
+    const locale = localeOf(ledger.config)
+    if (config.quotaSource !== 'cli' && config.quotaSource !== 'bailian') {
+      const enabledPlans = enabledPlanSetOf(ledger.config)
+      const result = qwenTokenPlanWindows(ledger.days ?? {}, config, Date.now(),
+        (provider, model) => billingClassOf(provider, model, ledger.config.planBilling, enabledPlans, ledger.config.prices) === 'plan')
+      cache.fetchedAt = Date.now()
+      cache.value = result === null
+        ? { ...emptyCodingPlan(), message: tmsg(locale, 'qwenPlanCreditsInvalid') }
+        : { status: 'ok', message: '', fetchedAt: cache.fetchedAt, windows: result.windows }
+      return
+    }
+    if (cache.inFlight) return cache.inFlight
+    if (!force && Date.now() - cache.fetchedAt < Math.max(1, Number(config.refreshMinutes) || 15) * 60_000) return
+    cache.controller = new AbortController()
+    const current = () => codingPlanCaches.qwen === cache && qwenFingerprint() === fingerprint
+    const queryCli = config.quotaSource === 'bailian' ? queryBailianCli : queryQwenCli
+    cache.inFlight = queryCli(locale, { signal: cache.controller.signal }).then(result => {
+      if (current()) cache.value = { status: 'ok', message: '', fetchedAt: Date.now(), windows: result.windows }
+    }, error => {
+      if (current()) cache.value = { ...emptyCodingPlan(), status: error.soft ? 'off' : 'error', message: error.message, fetchedAt: Date.now() }
+    }).finally(() => {
+      cache.fetchedAt = Date.now() // Failures also observe the interval; manual refresh retries immediately.
+      delete cache.inFlight
+      delete cache.controller
+    })
+    return cache.inFlight
+  }
+
+  const miniMaxFingerprint = () => JSON.stringify([codingPlanConfigOf('minimax'), localeOf(ledger.config)])
+  const ensureMiniMaxPlan = async force => {
+    const config = codingPlanConfigOf('minimax'), fingerprint = miniMaxFingerprint()
+    let cache = codingPlanCaches.minimax
+    if (cache?.fingerprint !== fingerprint) {
+      cache?.controller?.abort()
+      cache = codingPlanCaches.minimax = { fingerprint, fetchedAt: 0, value: emptyCodingPlan() }
+    }
+    if (config.enabled !== true || config.display === 'off') return
+    if (cache.inFlight) return cache.inFlight
+    if (!force && Date.now() - cache.fetchedAt < Math.max(1, Number(config.refreshMinutes) || 15) * 60_000) return
+    cache.controller = new AbortController()
+    const current = () => codingPlanCaches.minimax === cache && miniMaxFingerprint() === fingerprint
+    cache.inFlight = (async () => {
+      const key = await resolveCodingPlanKey(ctx, 'minimax', ledger.config)
+      if (!current()) return
+      const result = await queryCodingPlan('minimax', key, localeOf(ledger.config), tmsg, { baseUrl: config.baseUrl, signal: cache.controller.signal })
+      if (!current()) return
+      cache.value = { status: 'ok', message: '', fetchedAt: Date.now(), windows: result.windows }
+      recordQuotaSamples('minimax', result.windows)
+    })().catch(error => {
+      if (current()) cache.value = { ...emptyCodingPlan(), status: error.soft ? 'off' : 'error', message: error.message, fetchedAt: Date.now() }
+    }).finally(() => {
+      cache.fetchedAt = Date.now()
+      delete cache.inFlight
+      delete cache.controller
+    })
+    return cache.inFlight
+  }
+
   /** 按需刷新单家 coding plan 额度(过期或 force);未启用/显示关闭/失败均落空或 error 状态。 */
   const ensureCodingPlan = async (id, force = false) => {
+    if (!active) return
+    if (id === 'qwen') return ensureQwenPlan(force)
+    if (id === 'minimax') return ensureMiniMaxPlan(force)
     const config = codingPlanConfigOf(id)
     if (config.enabled !== true || config.display === 'off') {
+      codingPlanCaches[id]?.controller?.abort()
       codingPlanCaches[id] = { fetchedAt: Date.now(), value: emptyCodingPlan() }
       return
     }
@@ -1607,20 +1828,6 @@ function createService(ctx, ledger) {
       }
       return
     }
-    // 千问 Token Plan(issue #78)与 SCNet 同型:平台无 API-Key 化额度端点(额度仅
-    // 控制台可见,网关需 cookie+sec_token),按官方 Credits 抵扣率本地估算,跳过缓存间隔。
-    if (id === 'qwen') {
-      const enabledPlans = enabledPlanSetOf(ledger.config)
-      const result = qwenTokenPlanWindows(ledger.days ?? {}, config, Date.now(),
-        (provider, model) => billingClassOf(provider, model, ledger.config.planBilling, enabledPlans, ledger.config.prices) === 'plan')
-      codingPlanCaches[id] = {
-        fetchedAt: Date.now(),
-        value: result === null
-          ? { ...emptyCodingPlan(), status: 'off', fetchedAt: Date.now(), message: tmsg(localeOf(ledger.config), 'qwenPlanCreditsInvalid') }
-          : { status: 'ok', message: '', fetchedAt: Date.now(), windows: result.windows },
-      }
-      return
-    }
     const interval = Math.max(1, Number(config.refreshMinutes) || 15) * 60_000
     let cache = codingPlanCaches[id]
     if (!force && cache !== undefined && Date.now() - cache.fetchedAt < interval) return
@@ -1630,20 +1837,27 @@ function createService(ctx, ledger) {
       // force 链式等待:等上一个任务结束后由本调用继续走新建流程,
       // 保证手动强制刷新不被在途任务吞掉(否则返回的是即将过期的旧数据)。
       await prev.catch(() => {})
+      if (!active || codingPlanConfigOf(id).enabled !== true || codingPlanConfigOf(id).display === 'off') return
       // 任务完成时代码会整体替换 codingPlanCaches[id] 条目:必须重读活引用后再
       // 回到 while 条件判定,否则旧对象上的 inFlight 恒等于 prev,并发 force 刷新
       // 会各自重复发起任务(双重上游请求)。
       cache = codingPlanCaches[id]
     }
     const locale = localeOf(ledger.config)
+    const controller = new AbortController()
     const task = (async () => {
       const key = await resolveCodingPlanKey(ctx, id, ledger.config)
-      return queryCodingPlan(id, key, locale, tmsg)
+      return queryCodingPlan(id, key, locale, tmsg, {
+        signal: controller.signal,
+        onAttempt: attempt => ctx.logger?.debug?.('[cost-meter] quota candidate', attempt),
+      })
     })().then(result => {
+      if (!active || codingPlanCaches[id]?.inFlight !== task) return
       codingPlanCaches[id] = { fetchedAt: Date.now(), value: { status: 'ok', message: '', fetchedAt: Date.now(), windows: result.windows } }
       // SCNet 百分比来自本地自估(自我引用),不参与采样估算。
       if (id !== 'scnet') recordQuotaSamples(id, result.windows)
     }, error => {
+      if (!active || codingPlanCaches[id]?.inFlight !== task) return
       // 失败不更新外层 fetchedAt:让下次轮询重试(PR #40,与 ensureGoQuota 同策略)。
       // 软失败(未配置凭据/无订阅)完整缓存;硬失败写 error 状态但保留旧 fetchedAt。
       const now = Date.now()
@@ -1659,7 +1873,7 @@ function createService(ctx, ledger) {
     }).finally(() => {
       if (codingPlanCaches[id]?.inFlight === task) delete codingPlanCaches[id].inFlight
     })
-    codingPlanCaches[id] = { ...(codingPlanCaches[id] ?? { fetchedAt: 0, value: emptyCodingPlan() }), inFlight: task }
+    codingPlanCaches[id] = { ...(codingPlanCaches[id] ?? { fetchedAt: 0, value: emptyCodingPlan() }), inFlight: task, controller }
     await task
   }
 
@@ -1674,11 +1888,15 @@ function createService(ctx, ledger) {
     const configured = await resolveGatewayKeyConfigured(ctx, source)
     const fingerprint = gatewaySourceFingerprint(source, configured)
     const configFingerprint = gatewaySourceConfigFingerprintOf(source)
+    const currentSource = () => active && gatewaySourceConfigs().some(entry => entry.id === id && entry.enabled !== false
+      && gatewaySourceConfigFingerprintOf(entry) === configFingerprint)
+    if (!currentSource()) return emptyGatewayForSource(source)
     let cache = gatewayQuotaCaches[id]
     if (cache === undefined || cache.configFingerprint !== configFingerprint || cache.keyConfigured !== configured) {
       // Preserve only a valid LKG when config/key identity is unchanged. A changed
       // source starts empty; an old in-flight task is intentionally detached.
-      cache = { fetchedAt: 0, value: emptyGatewayForSource(source), lastGood: null, sourceFingerprint: fingerprint }
+      cache = { fetchedAt: 0, value: emptyGatewayForSource(source), lastGood: null, sourceFingerprint: fingerprint,
+        configFingerprint, keyConfigured: configured }
       gatewayQuotaCaches[id] = cache
     }
     const interval = Math.max(1, Number(source.refreshMinutes) || 15) * 60_000
@@ -1691,8 +1909,9 @@ function createService(ctx, ledger) {
       }
       // Force intentionally waits for the current request, then starts a new one.
       await current.catch(() => {})
+      if (!currentSource()) return emptyGatewayForSource(source)
       cache = gatewayQuotaCaches[id]
-      if (cache?.inFlight !== undefined) return ensureGatewayQuota(source, true)
+      if (cache === undefined || cache.inFlight !== undefined) return ensureGatewayQuota(source, true)
     }
     const task = queryGatewayQuota(ctx, source).then(value => {
       const active = gatewayQuotaCaches[id]
@@ -1704,14 +1923,14 @@ function createService(ctx, ledger) {
         message: typeof value?.message === 'string' ? value.message : '', attemptedAt: value?.attemptedAt ?? Date.now(),
         keyConfigured: value?.keyConfigured === true, keySource: typeof value?.keySource === 'string' ? value.keySource : 'none',
       }
-      gatewayQuotaCaches[id] = { fetchedAt: ok ? Date.now() : (active.fetchedAt ?? 0), value: next, lastGood, sourceFingerprint: fingerprint }
+      gatewayQuotaCaches[id] = { ...active, fetchedAt: ok ? Date.now() : (active.fetchedAt ?? 0), value: next, lastGood }
       return next
     }).catch(error => {
       const active = gatewayQuotaCaches[id]
       if (active?.inFlight !== task || active.sourceFingerprint !== fingerprint) return active?.value ?? emptyGatewayForSource(source)
       const lastGood = active.lastGood
       const next = { ...(lastGood ?? emptyGatewayForSource(source)), status: lastGood ? 'stale' : 'error', message: 'gateway query failed', attemptedAt: Date.now() }
-      gatewayQuotaCaches[id] = { fetchedAt: active.fetchedAt ?? 0, value: next, lastGood, sourceFingerprint: fingerprint }
+      gatewayQuotaCaches[id] = { ...active, fetchedAt: active.fetchedAt ?? 0, value: next, lastGood }
       return next
     }).finally(() => {
       if (gatewayQuotaCaches[id]?.inFlight === task) {
@@ -1749,7 +1968,9 @@ function createService(ctx, ledger) {
     }
     kick(balanceCache.fetchedAt > 0, () => ensureBalance(forceBalance))
     kick(goQuotaCache.fetchedAt > 0, () => ensureGoQuota(false))
-    kick(Object.values(customBalanceCaches).some(cache => (cache?.fetchedAt ?? 0) > 0), () => ensureCustomBalance(false))
+    const customWarm = customBalanceConfigs().every((entry, index) => entry?.enabled !== true || entry.display === 'off'
+      || customBalanceCacheAt(index).fetchedAt > 0)
+    kick(customWarm, () => ensureCustomBalance(false))
     kick(Object.values(codingPlanCaches).some(cache => (cache?.fetchedAt ?? 0) > 0), () => ensureCodingPlans(false))
     pending.push(ensureCodingPlan('scnet', false))
     const enabledGatewaySources = gatewaySourceConfigs().filter(source => source?.enabled !== false)
@@ -1766,6 +1987,7 @@ function createService(ctx, ledger) {
     },
 
     async updateConfig(patch) {
+      const before = ledger.config
       const gatewayBefore = ledger.config?.gatewayQuotas
       const gatewayBeforeSources = gatewayBefore?.sources
       const currencyBefore = ledger.config.prices?.currency === 'CNY' ? 'CNY' : 'USD'
@@ -1775,6 +1997,12 @@ function createService(ctx, ledger) {
         throw new Error(tmsg(locale, 'configRejected', { errors: errors.join(locale === 'zh' ? ';' : '; ') }))
       }
       ledger.config = config
+      // Cache values belong to their query settings and credential generation.
+      // Reset before build() so disabled or changed queries cannot publish late results.
+      for (const target of ['balance', 'goQuota', ...CODING_PLAN_PROVIDER_IDS.map(id => 'codingPlans.' + id)]) {
+        const value = cfg => target.startsWith('codingPlans.') ? cfg.codingPlans?.[target.split('.')[1]] : cfg[target]
+        if (before.locale !== config.locale || JSON.stringify(value(before)) !== JSON.stringify(value(config))) resetQueryCache(target)
+      }
       if (patch?.gatewayQuotas !== undefined || gatewayBefore !== config.gatewayQuotas) {
         syncGatewayQuotaCaches(gatewayBeforeSources, config.gatewayQuotas?.sources)
       }
@@ -1952,6 +2180,7 @@ function createService(ctx, ledger) {
         invalidateCustomBalanceCachesForVar(customVar)
         for (const source of gatewaySourceConfigs()) if (managementKeyVarOf(source) === customVar) delete gatewayQuotaCaches[source.id]
       }
+      else resetQueryCache(key)
       return {
         ok: true,
         message: tmsg(locale, 'credentialSaved'),
@@ -1992,6 +2221,7 @@ function createService(ctx, ledger) {
         invalidateCustomBalanceCachesForVar(customVar)
         for (const source of gatewaySourceConfigs()) if (managementKeyVarOf(source) === customVar) delete gatewayQuotaCaches[source.id]
       }
+      else resetQueryCache(key)
       return {
         ok: true,
         message: tmsg(locale, 'credentialCleared'),
@@ -2066,18 +2296,24 @@ function createService(ctx, ledger) {
         const baseMessage = fallbackError === null
           ? tmsg(locale, 'pricesSynced', { ids: joined })
           : tmsg(locale, 'pricesSyncedFallback', { error: fallbackError instanceof Error ? fallbackError.message : String(fallbackError), ids: joined })
+        // OpenRouter 附加腿(Phase2):官方页不管成败都尝试刷新,不翻转 ok。
+        const orNote = await openRouterRefreshNote(openRouterPrices, locale)
+        const parts = recomputeNote.length > 0 ? [baseMessage, recomputeNote, orNote] : [baseMessage, orNote]
         return {
           ok: true,
-          message: recomputeNote.length > 0 ? `${baseMessage}。${recomputeNote}` : baseMessage,
+          message: parts.join('。'),
           state: await build(false),
         }
       } catch (error) {
         const detail = error?.code === 'ERR_NO_MODELS'
           ? tmsg(locale, 'noModelsParsed')
           : (error instanceof Error ? error.message : String(error))
+        // 官方页失败也不放弃 OpenRouter 腿:两路独立源,备注如实说明。
+        const orNote = await openRouterRefreshNote(openRouterPrices, locale)
         return {
           ok: false,
-          message: tmsg(locale, 'priceSyncFailed', { error: detail }),
+          message: `${tmsg(locale, 'priceSyncFailed', { error: detail })}。${orNote}`,
+          state: await build(false),
         }
       }
     },
@@ -2086,11 +2322,7 @@ function createService(ctx, ledger) {
       // 清空全部历史:除 days 外,Plan 百分比采样/小时桶与余额对账基准一并
       // 重置,否则残留样本仍会推算出 planStats、对账基准继续引用旧日合计,
       // 与「清空全部历史」语义不一致。
-      ledger.days = {}
-      ledger.planSamples = {}
-      ledger.planHourBuckets = {}
-      ledger.balanceRef = null
-      ledger.scheduleWrite()
+      ledger.resetHistory()
       return build(false)
     },
 
@@ -2128,6 +2360,9 @@ function createService(ctx, ledger) {
 
     // 跨全部日期返回前 N 个会话(issue #22 按会话视角,不分日期)。
     // sort:cost(费用) | time(会话创建时间) | recent(实时顺序,即账本/侧边栏顺序);dir:asc | desc。
+    async getSessionCost(sessionId) {
+      return readSessionCost(ledger, ctx, sessionId)
+    },
     async getTopSessions(limit, sort = 'cost', dir = 'desc') {
       const n = Math.max(1, Math.min(500, Math.floor(Number(limit)) || 100))
       const sortKey = sort === 'time' || sort === 'recent' ? sort : 'cost'
@@ -2610,6 +2845,9 @@ export async function runStartupImports(ledger, sessionsRoot) {
     // 新价格可能改变 plan 归类所需的 apiCost 口径，联动重算一次
     if (repaired.recostedBuckets > 0) splitLedgerApiCost(ledger)
   }
+  // 离线时先按快照修复零费用的 OpenRouter 桶；全目录成功后才标记完成。
+  const openRouterRepair = repairOpenRouterLedger(ledger)
+  if (openRouterRepair.recostedBuckets > 0) ledger.scheduleWrite()
   // 计费口径一致性重建(v1.6.0):桶级 apiCost 按分类回写 + 容器 = Σ桶 +
   // 无明细残差归 API;修复桶/容器脱节导致的累计费用失真(用户实测:插件
   // $5.26 vs 桶级分布 $12.41)。幂等,标记防重跑。v4:去掉 modlens-zen
@@ -2726,6 +2964,35 @@ export async function runStartupImports(ledger, sessionsRoot) {
     ledger.scheduleWrite()
     console.log(`[dsh-cost-meter] 已应用 DeepSeek 9 月新定价，按完整日志更新 ${stats.recostedSessions} 个会话；跳过 ${stats.skippedSessions} 个覆盖不全的会话`)
   }
+  // 法定假日全谷价修复：日聚合桶缺少请求时刻，不能直接减半；仅对能由日志
+  // 完整覆盖的会话逐笔重算，并按差额同步日/会话合计。相邻日期覆盖非北京时区。
+  if (!ledger.migrations.includes('holiday-offpeak-recompute-v1')) {
+    const dates = new Set()
+    for (const holiday of ledger.config.peakHolidays ?? []) {
+      const day = Date.parse(holiday + 'T00:00:00Z')
+      for (const offset of [-1, 0, 1]) dates.add(new Date(day + offset * 86400000).toISOString().slice(0, 10))
+    }
+    const ids = new Set()
+    for (const date of dates) for (const row of ledger.days?.[date]?.sessions ?? []) {
+      if (typeof row?.id === 'string' && row.id) ids.add(row.id)
+    }
+    if (ids.size > 0) {
+      const options = { mode: ledger.config.priceMatch, overrides: ledger.config.priceOverrides }
+      const stats = await recomputeLedgerPricingBasis(ledger, sessionsRoot, (key, date) => {
+        if (!dates.has(date)) return false
+        const sep = key.indexOf(':')
+        const provider = sep > 0 ? key.slice(0, sep) : 'deepseek'
+        const model = sep > 0 ? key.slice(sep + 1) : key
+        return providerPriceEntryFor(provider, model, ledger.config.prices, options).billingMode === 'deepseek-peak'
+      }, ids)
+      if (stats.recostedSessions > 0) {
+        splitLedgerApiCost(ledger)
+        console.log(`[dsh-cost-meter] 法定假日计价已按完整日志重算 ${stats.recostedSessions} 个会话 / ${stats.recostedDays} 天；跳过 ${stats.skippedSessions} 个覆盖不全的会话`)
+      }
+    }
+    ledger.migrations.push('holiday-offpeak-recompute-v1')
+    ledger.scheduleWrite()
+  }
 }
 
 /**
@@ -2741,6 +3008,15 @@ export function apply(ctx) {
 
   // 卸载/退出前最终落盘。
   ctx.effect(() => () => ledger.close(), 'cost-meter: ledger close')
+  const openRouterPrices = createOpenRouterPriceRefresh(ledger)
+  let active = true
+  ctx.effect(() => () => { active = false; openRouterPrices.dispose() }, 'cost-meter: openrouter requests')
+  const refreshOpenRouter = () => {
+    if (!active) return
+    return openRouterPrices.refresh().catch(error => {
+      if (active) console.warn(`[dsh-cost-meter] OpenRouter 价格刷新失败(保留本地价格): ${String(error?.message ?? error)}`)
+    })
+  }
 
   // 历史账本按模型回填 + 首次启动自动导入安装前历史(issue #27):
   // 启动后延迟执行,避免拖慢宿主启动;均幂等,只补缺失,不重复计数。
@@ -2759,13 +3035,18 @@ export function apply(ctx) {
     } catch (error) {
       console.warn(`[dsh-cost-meter] 自定义余额请求头密钥迁移失败: ${String(error?.message ?? error)}`)
     }
-    runStartupImports(ledger, join(resolveDshHome(), 'sessions')).catch(error => {
+    if (!active) return
+    await runStartupImports(ledger, join(resolveDshHome(), 'sessions')).catch(error => {
       console.warn(`[dsh-cost-meter] 启动期历史导入失败: ${String(error?.message ?? error)}`)
     })
+    await refreshOpenRouter()
   }, 3000)
   backfillTimer.unref?.()
   // 卸载/退出时清掉尚未触发的启动回填定时器:dispose 后不再执行导入。
   ctx.effect(() => () => clearTimeout(backfillTimer), 'cost-meter: backfill timer')
+  const openRouterTimer = setInterval(() => { void refreshOpenRouter() }, 3600_000)
+  openRouterTimer.unref?.()
+  ctx.effect(() => () => clearInterval(openRouterTimer), 'cost-meter: openrouter refresh timer')
 
   // 包裹 llm/stream:捕获 usage 块(位于 finish 之前),按官方价格计入账本。
   // 本插件是链尾监听者,next() 即适配器流;仅透传数据块,不改变流协议。
@@ -2800,10 +3081,21 @@ export function apply(ctx) {
   }), { global: true })
 
   // costUsage 投影:向会话历史页/推送帧提供 token 桶(客户端计价)。
+  installNativeSearchBilling(ctx, ledger)
+
   ctx.inject(['sessionProjections'], (projectionCtx) => {
     projectionCtx.sessionProjections.register(makeCostUsageProjection(ledger))
   })
 
   // RPC 服务:客户端经 remote.costMeter.* 调用(./typert 清单由 typert-loader 注册)。
-  ctx.provide('costMeter', createService(ctx, ledger))
+  ctx.provide('costMeter', createService(ctx, ledger, openRouterPrices))
+
+  // dshmarket 1.47 热安装通过独立 Include 挂载 file:// 入口；它不在根 Loader
+  // 的包名扫描树中，typert-loader 因此漏注册 (#154)。正常包名启动仍由宿主注册。
+  // 注入上下文拥有注册效果：支持 registry 晚到，卸载/重新挂载时自动撤销/恢复。
+  if (ctx.fiber?.entry?.options.name?.startsWith('file:')) {
+    ctx.inject(['typert'], typertCtx => {
+      if (!typertCtx.typert.getPackage('dsh-cost-meter', 'host')) typertCtx.typert.register(TYPERT)
+    })
+  }
 }
